@@ -2,350 +2,352 @@
 #include <PubSubClient.h>
 #include <WiFi.h>
 
-// --- KONFIGURASI PIN (Sesuai Rangkaian Simulasi) ---
-#define PIR_PIN 14    // Pin D14: Input sensor PIR
-#define DHT_PIN 27    // Pin D27: Input sensor DHT11
-#define LDR_PIN 34    // Pin D34 (ADC1): Input analog sensor LDR
-#define BUZZER_PIN 26 // Pin D26: Output buzzer
-#define LED_PIN 4     // Pin D4: Output LED indikator eksternal
+// --- PIN CONFIGURATION (matches the simulated circuit) ---
+#define PIR_PIN 14    // D14: PIR sensor input
+#define DHT_PIN 27    // D27: DHT11 sensor input
+#define LDR_PIN 34    // D34 (ADC1): LDR analog input
+#define BUZZER_PIN 26 // D26: buzzer output
+#define LED_PIN 4     // D4: external indicator LED
 
 #define DHT_TYPE DHT11
 DHT dht(DHT_PIN, DHT_TYPE);
 
-// --- IDENTITAS PERANGKAT (namespace topik MQTT) ---
-// Semua topik memakai awalan unik per perangkat: comfortroom-<uuid>/room/...
-// Broker publik (broker.hivemq.com) dipakai bersama, jadi awalan ini mencegah
-// perangkat lain membaca data kita atau mengirim perintah ke kita.
-// Ganti UUID di bawah untuk setiap unit fisik yang berbeda.
-#define ID_PERANGKAT "comfortroom-8f2c41d6-9a3b-4e57-b0d2-6c5a7e19f408"
-#define AWALAN_TOPIK ID_PERANGKAT "/room/"
+// --- DEVICE IDENTITY (MQTT topic namespace) ---
+// Every topic is prefixed with a per-device namespace: comfortroom-<uuid>/room/...
+// The broker (broker.hivemq.com) is public and shared, so this prefix is what
+// keeps other devices from reading our data or sending us commands.
+// Use a different UUID for each physical unit.
+#define DEVICE_ID "comfortroom-8f2c41d6-9a3b-4e57-b0d2-6c5a7e19f408"
+#define TOPIC_PREFIX DEVICE_ID "/room/"
 
-// Topik dibentuk saat kompilasi (penggabungan literal), bukan saat runtime,
-// sehingga tidak ada alokasi heap: TOPIK("suhu") ->
-// "comfortroom-8f2c.../room/suhu"
-#define TOPIK(jalur) (AWALAN_TOPIK jalur)
+// Topics are concatenated at compile time (adjacent string literals) instead of
+// at runtime, so building one performs no heap allocation:
+// TOPIC("temperature") -> "comfortroom-8f2c.../room/temperature"
+#define TOPIC(path) (TOPIC_PREFIX path)
 
-// --- KONFIGURASI WIFI & MQTT ---
-// Placeholder: isi dengan kredensial WiFi Anda sebelum mengunggah.
-// Untuk simulasi Wokwi gunakan ssid "Wokwi-GUEST" dan password "".
-const char *ssid = "NAMA_WIFI_ANDA";
-const char *password = "PASSWORD_WIFI_ANDA";
+// --- WIFI & MQTT CONFIGURATION ---
+// Placeholders: fill in your own WiFi credentials before uploading.
+// For the Wokwi simulator use ssid "Wokwi-GUEST" and password "".
+const char *ssid = "YOUR_WIFI_SSID";
+const char *password = "YOUR_WIFI_PASSWORD";
 const char *mqtt_server = "broker.hivemq.com";
 const int mqtt_port = 1883;
 
 WiFiClient espClient;
 
-// --- PARAMETER & VARIABEL KONTROL ---
-float batasSuhu = 30.0; // Batas suhu panas (derajat Celcius)
-int batasCahaya = 2000; // Ambang batas ADC LDR (0 - 4095)
-unsigned long durasiTanpaGerak =
-    10000; // 10 detik tanpa gerakan dianggap ruangan kosong (untuk simulasi)
-unsigned long intervalPublish = 3000; // Interval kirim data ke MQTT (3 detik)
+// --- CONTROL PARAMETERS & STATE ---
+float tempThreshold = 30.0;  // Temperature that counts as hot (degrees Celsius)
+int lightThreshold = 2000;   // LDR ADC threshold (0 - 4095)
+unsigned long noMotionHoldMs =
+    10000; // 10 s without motion means the room is empty (simulation value)
+unsigned long publishIntervalMs = 3000; // Telemetry interval (3 s)
 
-// Batas nilai yang diterima dari dashboard (validasi perintah)
-const float BATAS_SUHU_MAKS = 100.0;          // derajat Celcius
-const int BATAS_CAHAYA_MIN = 0;               // batas bawah ADC
-const int BATAS_CAHAYA_MAKS = 4095;           // batas atas ADC
-const unsigned long DURASI_GERAK_MINS = 1;    // detik
-const unsigned long DURASI_GERAK_MAKS = 3600; // detik
-const unsigned long INTERVAL_MIN = 1;         // detik
-const unsigned long INTERVAL_MAKS = 3600;     // detik
+// Accepted value ranges for dashboard commands (command validation)
+const float TEMP_THRESHOLD_MAX = 100.0;            // degrees Celsius
+const int LIGHT_THRESHOLD_MIN = 0;                 // ADC lower bound
+const int LIGHT_THRESHOLD_MAX = 4095;              // ADC upper bound
+const unsigned long NO_MOTION_HOLD_MIN_SEC = 1;    // seconds
+const unsigned long NO_MOTION_HOLD_MAX_SEC = 3600; // seconds
+const unsigned long PUBLISH_INTERVAL_MIN_SEC = 1;  // seconds
+const unsigned long PUBLISH_INTERVAL_MAX_SEC = 3600; // seconds
 
-bool isPublishingEnabled = true; // Status aktif/nonaktif pengiriman data
-bool buzzerMuted = false;        // Status mute buzzer dari dashboard
+bool isPublishingEnabled = true; // Whether telemetry publishing is active
+bool buzzerMuted = false;        // Buzzer muted from the dashboard
 
-unsigned long lastPublishTime = 0;
-unsigned long lastMotionTime = 0;
+unsigned long lastPublishMs = 0;
+unsigned long lastMotionMs = 0;
 
-// --- STATUS RUANGAN (hasil fusi sensor) ---
-// Disimpan sebagai enum agar hanya tiga kondisi yang sah. Yang dikirim ke MQTT
-// hanyalah KODE (namaStatus); kalimat yang dibaca pengguna diatur dashboard.
-enum StatusRuangan : uint8_t { NORMAL, PANAS, BOROS_ENERGI };
+// --- ROOM STATUS (sensor fusion result) ---
+// Kept as an enum so only three conditions can exist. Only the CODE produced by
+// statusCode() goes over MQTT; the wording shown to users belongs to the
+// dashboard.
+enum RoomStatus : uint8_t { STATUS_NORMAL, STATUS_HOT, STATUS_ENERGY_WASTE };
 
-StatusRuangan statusRuangan = NORMAL;
+RoomStatus roomStatus = STATUS_NORMAL;
 
-// Status terakhir yang sudah terkirim (-1 = belum pernah / paksa kirim).
-int statusTerakhirDikirim = -1;
+// Last status that was published (-1 = never sent / force a resend).
+int lastSentStatus = -1;
 
-// Kode status untuk topik MQTT. Jangan diubah tanpa memperbarui dashboard.
-const char *namaStatus(StatusRuangan status) {
+// Status code published to MQTT. Do not change without updating the dashboard.
+const char *statusCode(RoomStatus status) {
   switch (status) {
-  case PANAS:
-    return "PANAS";
-  case BOROS_ENERGI:
-    return "BOROS";
-  case NORMAL:
+  case STATUS_HOT:
+    return "HOT";
+  case STATUS_ENERGY_WASTE:
+    return "ENERGY_WASTE";
+  case STATUS_NORMAL:
   default:
     return "NORMAL";
   }
 }
 
-// Teks penjelasan hanya untuk Serial Monitor (lokal), tidak dikirim ke broker.
-const char *pesanStatus(StatusRuangan status) {
+// Description used by the Serial Monitor only; never published to the broker.
+const char *statusDescription(RoomStatus status) {
   switch (status) {
-  case PANAS:
-    return "ruangan terlalu panas";
-  case BOROS_ENERGI:
-    return "pemborosan energi";
-  case NORMAL:
+  case STATUS_HOT:
+    return "room too hot";
+  case STATUS_ENERGY_WASTE:
+    return "energy waste";
+  case STATUS_NORMAL:
   default:
     return "normal";
   }
 }
 
-// --- ANTREAN ACK (Konfirmasi Perintah dari Dashboard) ---
-// Konfirmasi tidak dikirim langsung dari callback, melainkan diantrekan lalu
-// dikirim di loop() setelah client.loop() selesai. Ini menghindari publish saat
-// buffer MQTT sedang dipakai untuk menerima pesan masuk.
-const int KAPASITAS_ANTREAN_ACK = 4;
-String antreanAck[KAPASITAS_ANTREAN_ACK];
-int indeksMasukAck = 0;
-int indeksKeluarAck = 0;
-int jumlahAck = 0;
+// --- ACK QUEUE (command confirmations for the dashboard) ---
+// Confirmations are not published straight from the callback; they are queued
+// and flushed from loop() after client.loop() returns. This avoids publishing
+// while the MQTT buffer is still in use by the incoming message.
+const int ACK_QUEUE_SIZE = 4;
+String ackQueue[ACK_QUEUE_SIZE];
+int ackQueueHead = 0;
+int ackQueueTail = 0;
+int ackQueueCount = 0;
 
-void jadwalkanAck(const String &pesan) {
-  if (jumlahAck >= KAPASITAS_ANTREAN_ACK) {
-    Serial.println("Antrean ack penuh, pesan dibuang: " + pesan);
+void queueAck(const String &message) {
+  if (ackQueueCount >= ACK_QUEUE_SIZE) {
+    Serial.println("Ack queue full, dropping message: " + message);
     return;
   }
-  antreanAck[indeksMasukAck] = pesan;
-  indeksMasukAck = (indeksMasukAck + 1) % KAPASITAS_ANTREAN_ACK;
-  jumlahAck++;
+  ackQueue[ackQueueHead] = message;
+  ackQueueHead = (ackQueueHead + 1) % ACK_QUEUE_SIZE;
+  ackQueueCount++;
 }
 
-// --- PEMBACA ANGKA PAYLOAD (validasi perintah) ---
-// Mengembalikan false bila payload kosong atau mengandung karakter non-angka,
-// sehingga "abc" tidak lagi diam-diam dianggap 0.
-bool parseAngka(const String &pesan, long &hasil) {
-  if (pesan.length() == 0) {
+// --- PAYLOAD NUMBER PARSERS (command validation) ---
+// Return false when the payload is empty or contains non-numeric characters, so
+// "abc" is no longer silently treated as 0.
+bool parseInteger(const String &text, long &value) {
+  if (text.length() == 0) {
     return false;
   }
-  char *akhir = nullptr;
-  hasil = strtol(pesan.c_str(), &akhir, 10);
-  return akhir != nullptr && *akhir == '\0';
+  char *end = nullptr;
+  value = strtol(text.c_str(), &end, 10);
+  return end != nullptr && *end == '\0';
 }
 
-bool parseDesimal(const String &pesan, float &hasil) {
-  if (pesan.length() == 0) {
+bool parseDecimal(const String &text, float &value) {
+  if (text.length() == 0) {
     return false;
   }
-  char *akhir = nullptr;
-  hasil = strtof(pesan.c_str(), &akhir);
-  return akhir != nullptr && *akhir == '\0';
+  char *end = nullptr;
+  value = strtof(text.c_str(), &end);
+  return end != nullptr && *end == '\0';
 }
 
-// --- FUNGSI CALLBACK MQTT (Menerima Perintah dari Dashboard) ---
-// Format ack (tidak berisi kalimat; teks untuk pengguna diatur dashboard):
-//   <perintah>|OK|<nilai>     contoh: batas_suhu|OK|32.0
-//   <perintah>|GAGAL|<kode>   contoh: interval|GAGAL|E_RANGE
-// Kode kesalahan: E_TOKEN (bukan ON/OFF), E_NUMBER (bukan angka),
-// E_RANGE (di luar rentang), E_UNKNOWN (perintah tak dikenal),
-// E_TOPIC (topik di luar control/#).
-void onMessage(char *topic, byte *payload, unsigned int length) {
-  String topikMasuk = String(topic);
-  String pesan = "";
+// --- MQTT CALLBACK (commands coming from the dashboard) ---
+// Ack formats (no prose; user-facing wording is owned by the dashboard):
+//   <command>|OK|<value>      example: temp_threshold|OK|32.0
+//   <command>|FAILED|<code>   example: interval|FAILED|E_RANGE
+// Error codes: E_TOKEN (not ON/OFF), E_NUMBER (not numeric),
+// E_RANGE (outside bounds), E_UNKNOWN (unknown command),
+// E_TOPIC (topic outside control/#).
+void handleMessage(char *topic, byte *payload, unsigned int length) {
+  String incomingTopic = String(topic);
+  String text = "";
   for (unsigned int i = 0; i < length; i++) {
-    pesan += (char)payload[i];
+    text += (char)payload[i];
   }
-  pesan.trim();
+  text.trim();
 
-  Serial.println("Perintah masuk [" + topikMasuk + "]: " + pesan);
+  Serial.println("Incoming command [" + incomingTopic + "]: " + text);
 
-  // Ambil nama perintah relatif terhadap "<id>/room/control/"
-  const char *awalanPerintah = TOPIK("control/");
-  if (!topikMasuk.startsWith(awalanPerintah)) {
-    Serial.println("Topik di luar " + String(TOPIK("control/#")) + ": " +
-                   topikMasuk);
-    jadwalkanAck("sistem|GAGAL|E_TOPIC");
+  // Take the command name relative to "<id>/room/control/"
+  const char *controlPrefix = TOPIC("control/");
+  if (!incomingTopic.startsWith(controlPrefix)) {
+    Serial.println("Topic outside " + String(TOPIC("control/#")) + ": " +
+                   incomingTopic);
+    queueAck("system|FAILED|E_TOPIC");
     return;
   }
-  String perintah = topikMasuk.substring(strlen(awalanPerintah));
+  String command = incomingTopic.substring(strlen(controlPrefix));
 
-  // 1. Kontrol Buzzer (contoh: control/buzzer = OFF)
-  if (perintah == "buzzer") {
-    if (pesan.equalsIgnoreCase("OFF")) {
+  // 1. Buzzer control (e.g. control/buzzer = OFF)
+  if (command == "buzzer") {
+    if (text.equalsIgnoreCase("OFF")) {
       buzzerMuted = true;
       digitalWrite(BUZZER_PIN, LOW);
-      jadwalkanAck("buzzer|OK");
-    } else if (pesan.equalsIgnoreCase("ON")) {
+      queueAck("buzzer|OK");
+    } else if (text.equalsIgnoreCase("ON")) {
       buzzerMuted = false;
-      jadwalkanAck("buzzer|OK");
+      queueAck("buzzer|OK");
     } else {
-      jadwalkanAck("buzzer|GAGAL|E_TOKEN");
+      queueAck("buzzer|FAILED|E_TOKEN");
     }
   }
-  // 2. Ubah Batas Suhu (contoh: control/batas_suhu = 32)
-  else if (perintah == "batas_suhu") {
-    float suhuBaru = 0;
-    if (!parseDesimal(pesan, suhuBaru)) {
-      jadwalkanAck("batas_suhu|GAGAL|E_NUMBER");
-    } else if (suhuBaru <= 0 || suhuBaru > BATAS_SUHU_MAKS) {
-      jadwalkanAck("batas_suhu|GAGAL|E_RANGE");
+  // 2. Change the temperature threshold (e.g. control/temp_threshold = 32)
+  else if (command == "temp_threshold") {
+    float newTemperature = 0;
+    if (!parseDecimal(text, newTemperature)) {
+      queueAck("temp_threshold|FAILED|E_NUMBER");
+    } else if (newTemperature <= 0 || newTemperature > TEMP_THRESHOLD_MAX) {
+      queueAck("temp_threshold|FAILED|E_RANGE");
     } else {
-      batasSuhu = suhuBaru;
-      jadwalkanAck(String("batas_suhu|OK|") + String(batasSuhu, 1));
+      tempThreshold = newTemperature;
+      queueAck(String("temp_threshold|OK|") + String(tempThreshold, 1));
     }
   }
-  // 3. Aktif/Nonaktif Pengiriman Data (contoh: control/publish = OFF)
-  else if (perintah == "publish") {
-    if (pesan.equalsIgnoreCase("OFF")) {
+  // 3. Enable/disable telemetry publishing (e.g. control/publish = OFF)
+  else if (command == "publish") {
+    if (text.equalsIgnoreCase("OFF")) {
       isPublishingEnabled = false;
-      jadwalkanAck("publish|OK");
-    } else if (pesan.equalsIgnoreCase("ON")) {
+      queueAck("publish|OK");
+    } else if (text.equalsIgnoreCase("ON")) {
       isPublishingEnabled = true;
-      // Paksa status dikirim ulang setelah pengiriman diaktifkan kembali
-      statusTerakhirDikirim = -1;
-      jadwalkanAck("publish|OK");
+      // Force a status resend once publishing is enabled again
+      lastSentStatus = -1;
+      queueAck("publish|OK");
     } else {
-      jadwalkanAck("publish|GAGAL|E_TOKEN");
+      queueAck("publish|FAILED|E_TOKEN");
     }
   }
-  // 4. Ubah Interval Pengiriman dalam detik (contoh: control/interval = 5)
-  else if (perintah == "interval") {
-    long detikBaru = 0;
-    if (!parseAngka(pesan, detikBaru)) {
-      jadwalkanAck("interval|GAGAL|E_NUMBER");
-    } else if (detikBaru < (long)INTERVAL_MIN ||
-               detikBaru > (long)INTERVAL_MAKS) {
-      jadwalkanAck("interval|GAGAL|E_RANGE");
+  // 4. Change the publish interval in seconds (e.g. control/interval = 5)
+  else if (command == "interval") {
+    long newSeconds = 0;
+    if (!parseInteger(text, newSeconds)) {
+      queueAck("interval|FAILED|E_NUMBER");
+    } else if (newSeconds < (long)PUBLISH_INTERVAL_MIN_SEC ||
+               newSeconds > (long)PUBLISH_INTERVAL_MAX_SEC) {
+      queueAck("interval|FAILED|E_RANGE");
     } else {
-      intervalPublish = detikBaru * 1000UL;
-      jadwalkanAck(String("interval|OK|") + String(detikBaru));
+      publishIntervalMs = newSeconds * 1000UL;
+      queueAck(String("interval|OK|") + String(newSeconds));
     }
   }
-  // 5. Ubah Durasi Tanpa Gerak dalam detik (contoh: control/durasi_gerak = 15)
-  else if (perintah == "durasi_gerak") {
-    long detikBaru = 0;
-    if (!parseAngka(pesan, detikBaru)) {
-      jadwalkanAck("durasi_gerak|GAGAL|E_NUMBER");
-    } else if (detikBaru < (long)DURASI_GERAK_MINS ||
-               detikBaru > (long)DURASI_GERAK_MAKS) {
-      jadwalkanAck("durasi_gerak|GAGAL|E_RANGE");
+  // 5. Change the no-motion hold in seconds (e.g. control/motion_hold = 15)
+  else if (command == "motion_hold") {
+    long newSeconds = 0;
+    if (!parseInteger(text, newSeconds)) {
+      queueAck("motion_hold|FAILED|E_NUMBER");
+    } else if (newSeconds < (long)NO_MOTION_HOLD_MIN_SEC ||
+               newSeconds > (long)NO_MOTION_HOLD_MAX_SEC) {
+      queueAck("motion_hold|FAILED|E_RANGE");
     } else {
-      durasiTanpaGerak = detikBaru * 1000UL;
-      jadwalkanAck(String("durasi_gerak|OK|") + String(detikBaru));
+      noMotionHoldMs = newSeconds * 1000UL;
+      queueAck(String("motion_hold|OK|") + String(newSeconds));
     }
   }
-  // 6. Ubah Ambang Cahaya LDR (contoh: control/batas_cahaya = 2500)
-  else if (perintah == "batas_cahaya") {
-    long nilaiBaru = 0;
-    if (!parseAngka(pesan, nilaiBaru)) {
-      jadwalkanAck("batas_cahaya|GAGAL|E_NUMBER");
-    } else if (nilaiBaru < BATAS_CAHAYA_MIN || nilaiBaru > BATAS_CAHAYA_MAKS) {
-      jadwalkanAck("batas_cahaya|GAGAL|E_RANGE");
+  // 6. Change the LDR light threshold (e.g. control/light_threshold = 2500)
+  else if (command == "light_threshold") {
+    long newValue = 0;
+    if (!parseInteger(text, newValue)) {
+      queueAck("light_threshold|FAILED|E_NUMBER");
+    } else if (newValue < LIGHT_THRESHOLD_MIN ||
+               newValue > LIGHT_THRESHOLD_MAX) {
+      queueAck("light_threshold|FAILED|E_RANGE");
     } else {
-      batasCahaya = (int)nilaiBaru;
-      jadwalkanAck(String("batas_cahaya|OK|") + String(batasCahaya));
+      lightThreshold = (int)newValue;
+      queueAck(String("light_threshold|OK|") + String(lightThreshold));
     }
   }
-  // 7. Perintah tidak dikenal: jangan diam, laporkan ke dashboard
+  // 7. Unknown command: report it instead of staying silent
   else {
-    jadwalkanAck(perintah + "|GAGAL|E_UNKNOWN");
+    queueAck(command + "|FAILED|E_UNKNOWN");
   }
 }
 
-PubSubClient client(mqtt_server, mqtt_port, onMessage, espClient);
+PubSubClient client(mqtt_server, mqtt_port, handleMessage, espClient);
 
-// --- HELPER PUBLISH DENGAN ERROR HANDLING ---
-// Mengembalikan true bila broker menerima paket. Kegagalan biasanya berarti
-// buffer MQTT penuh (topik + payload terlalu panjang).
-void logGagalPublish(const char *topikTujuan, unsigned int panjang) {
-  Serial.println("Gagal publish ke " + String(topikTujuan) + " (payload " +
-                 String(panjang) + " byte)");
+// --- PUBLISH HELPER WITH ERROR HANDLING ---
+// Returns true when the broker accepted the packet. A failure usually means the
+// MQTT buffer is full (topic plus payload too long).
+void logPublishFailure(const char *topic, unsigned int length) {
+  Serial.println("Failed to publish to " + String(topic) + " (payload " +
+                 String(length) + " bytes)");
 }
 
-bool kirim(const char *topikTujuan, const char *payload,
-           bool retain = false) {
-  if (!client.publish(topikTujuan, payload, retain)) {
-    logGagalPublish(topikTujuan, strlen(payload));
+bool publishMessage(const char *topic, const char *payload,
+                    bool retain = false) {
+  if (!client.publish(topic, payload, retain)) {
+    logPublishFailure(topic, strlen(payload));
     return false;
   }
   return true;
 }
 
-// Overload untuk payload yang perlu diformat dulu (angka, teks gabungan)
-bool kirim(const char *topikTujuan, const String &payload,
-           bool retain = false) {
-  if (!client.publish(topikTujuan, payload.c_str(), retain)) {
-    logGagalPublish(topikTujuan, payload.length());
+// Overload for payloads that must be formatted first (numbers, joined text)
+bool publishMessage(const char *topic, const String &payload,
+                    bool retain = false) {
+  if (!client.publish(topic, payload.c_str(), retain)) {
+    logPublishFailure(topic, payload.length());
     return false;
   }
   return true;
 }
 
-void kirimAckTertunda() {
-  while (jumlahAck > 0 && client.connected()) {
-    String pesan = antreanAck[indeksKeluarAck];
-    indeksKeluarAck = (indeksKeluarAck + 1) % KAPASITAS_ANTREAN_ACK;
-    jumlahAck--;
-    kirim(TOPIK("ack"), pesan);
+void flushAckQueue() {
+  while (ackQueueCount > 0 && client.connected()) {
+    String message = ackQueue[ackQueueTail];
+    ackQueueTail = (ackQueueTail + 1) % ACK_QUEUE_SIZE;
+    ackQueueCount--;
+    publishMessage(TOPIC("ack"), message);
   }
 }
 
-void setupWiFi() {
-  Serial.print("Menghubungkan ke WiFi ");
+void connectWiFi() {
+  Serial.print("Connecting to WiFi ");
   Serial.println(ssid);
 
   WiFi.begin(ssid, password);
 
-  // Dibatasi 20 detik agar sketch tidak menggantung saat placeholder belum
-  // diisi; percobaan ulang ditangani reconnectMQTT() di loop().
-  unsigned long mulai = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - mulai < 20000) {
+  // Bounded to 20 s so the sketch cannot hang while the placeholders are still
+  // unfilled; retries are handled by connectMQTT() in loop().
+  unsigned long startedAt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startedAt < 20000) {
     delay(500);
     Serial.print(".");
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi terhubung! IP: " + WiFi.localIP().toString());
+    Serial.println("\nWiFi connected! IP: " + WiFi.localIP().toString());
   } else {
     Serial.println(
-        "\nWiFi gagal tersambung. Periksa ssid/password (masih placeholder?)");
+        "\nWiFi connection failed. Check ssid/password (still placeholders?)");
   }
 }
 
-void reconnectMQTT() {
+void connectMQTT() {
   while (!client.connected()) {
-    // WiFi bisa putus lebih dulu daripada MQTT: sambungkan ulang dulu
+    // WiFi can drop before MQTT does, so reconnect it first
     if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("WiFi terputus, menyambung ulang...");
+      Serial.println("WiFi lost, reconnecting...");
       WiFi.reconnect();
-      unsigned long mulai = millis();
-      while (WiFi.status() != WL_CONNECTED && millis() - mulai < 10000) {
+      unsigned long startedAt = millis();
+      while (WiFi.status() != WL_CONNECTED && millis() - startedAt < 10000) {
         delay(500);
         Serial.print(".");
       }
       if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("\nWiFi belum tersambung, ulangi dalam 3 detik...");
+        Serial.println("\nWiFi still down, retrying in 3 s...");
         delay(3000);
         continue;
       }
     }
 
-    Serial.print("Menghubungkan ke MQTT Broker...");
+    Serial.print("Connecting to MQTT broker...");
     String clientId = "ESP32-SmartRoom-" + String(random(0xffff), HEX);
 
-    // Last Will and Testament: broker mengumumkan "offline" (retained) bila
-    // perangkat mati mendadak, sehingga dashboard tidak menampilkan data basi.
-    // "online" di topik ketersediaan sudah cukup sebagai tanda perangkat siap,
-    // jadi tidak perlu ack tambahan.
-    if (client.connect(clientId.c_str(), TOPIK("ketersediaan"), 1, true,
+    // Last will and testament: the broker announces "offline" (retained) if the
+    // device dies unexpectedly, so the dashboard never shows stale data.
+    // "online" on the availability topic already signals readiness, so no extra
+    // ack is needed here.
+    if (client.connect(clientId.c_str(), TOPIC("availability"), 1, true,
                        "offline")) {
-      Serial.println("Terhubung!");
+      Serial.println("connected!");
 
-      if (!client.subscribe(TOPIK("control/#"))) {
-        Serial.println("Peringatan: gagal subscribe ke " +
-                       String(TOPIK("control/#")));
+      if (!client.subscribe(TOPIC("control/#"))) {
+        Serial.println("Warning: failed to subscribe to " +
+                       String(TOPIC("control/#")));
       }
 
-      kirim(TOPIK("ketersediaan"), "online", true);
+      publishMessage(TOPIC("availability"), "online", true);
 
-      // Paksa status dikirim ulang setelah reconnect
-      statusTerakhirDikirim = -1;
+      // Force a status resend after reconnecting
+      lastSentStatus = -1;
     } else {
-      Serial.print("Gagal, rc=");
+      Serial.print("failed, rc=");
       Serial.print(client.state());
-      Serial.println(" coba lagi dalam 3 detik...");
+      Serial.println(" retrying in 3 s...");
       delay(3000);
     }
   }
@@ -362,103 +364,101 @@ void setup() {
   digitalWrite(LED_PIN, LOW);
 
   dht.begin();
-  setupWiFi();
+  connectWiFi();
 
   client.setServer(mqtt_server, mqtt_port);
-  client.setCallback(onMessage);
-  // Topik berawalan ID perangkat + pesan ack lebih panjang dari default 256
+  client.setCallback(handleMessage);
+  // Prefixed topics plus ack messages exceed the default 256-byte buffer
   client.setBufferSize(512);
 
-  lastMotionTime = millis();
+  lastMotionMs = millis();
 }
 
 void loop() {
-  // Jaga koneksi MQTT agar komunikasi dua arah selalu aktif
+  // Keep the MQTT connection alive so two-way communication keeps working
   if (!client.connected()) {
-    reconnectMQTT();
+    connectMQTT();
   }
   client.loop();
 
-  // Kirim konfirmasi perintah di luar callback
-  kirimAckTertunda();
+  // Send queued command confirmations outside the callback
+  flushAckQueue();
 
-  unsigned long currentMillis = millis();
+  unsigned long now = millis();
 
-  // --- 1. BACA KETIGA SENSOR ---
-  float suhu = dht.readTemperature();
-  float kelembaban = dht.readHumidity();
-  int nilaiLDR = analogRead(LDR_PIN);
-  int gerakan = digitalRead(PIR_PIN);
+  // --- 1. READ ALL THREE SENSORS ---
+  float temperature = dht.readTemperature();
+  float humidity = dht.readHumidity();
+  int lightLevel = analogRead(LDR_PIN);
+  int motion = digitalRead(PIR_PIN);
 
-  // Validasi pembacaan DHT11
-  if (isnan(suhu) || isnan(kelembaban)) {
-    Serial.println("Gagal membaca sensor DHT11!");
+  // Validate the DHT11 readings
+  if (isnan(temperature) || isnan(humidity)) {
+    Serial.println("Failed to read DHT11 sensor!");
     delay(500);
     return;
   }
 
-  // Catat waktu terakhir kali terdeteksi gerakan
-  if (gerakan == HIGH) {
-    lastMotionTime = currentMillis;
+  // Record the last time motion was detected
+  if (motion == HIGH) {
+    lastMotionMs = now;
   }
 
-  // Catatan: Pada modul LDR umum, nilai ADC < batasCahaya menandakan ruangan
-  // terang. Jika pada simulator slider terang menghasilkan nilai tinggi (>
-  // 2000), ubah tanda '<' menjadi '>'.
-  bool ruanganTerang = (nilaiLDR < batasCahaya);
-  bool adaOrang = (currentMillis - lastMotionTime < durasiTanpaGerak);
+  // Note: on common LDR modules an ADC reading below lightThreshold means the
+  // room is bright. If the simulator's brightness slider produces a high value
+  // (> 2000), invert the comparison below.
+  bool roomIsBright = (lightLevel < lightThreshold);
+  bool someonePresent = (now - lastMotionMs < noMotionHoldMs);
 
-  // --- 2. LOGIKA FUSI SENSOR (SENSOR FUSION) ---
-  if (suhu > batasSuhu && gerakan == HIGH) {
-    statusRuangan = PANAS;
-  } else if (ruanganTerang && !adaOrang) {
-    statusRuangan = BOROS_ENERGI;
+  // --- 2. SENSOR FUSION ---
+  if (temperature > tempThreshold && motion == HIGH) {
+    roomStatus = STATUS_HOT;
+  } else if (roomIsBright && !someonePresent) {
+    roomStatus = STATUS_ENERGY_WASTE;
   } else {
-    statusRuangan = NORMAL;
+    roomStatus = STATUS_NORMAL;
   }
 
-  // --- 3. AKTUATOR MENGIKUTI STATUS (LED & buzzer diatur di satu tempat) ---
-  switch (statusRuangan) {
-  case PANAS:
-  case BOROS_ENERGI:
+  // --- 3. ACTUATORS FOLLOW THE STATUS (LED & buzzer driven in one place) ---
+  switch (roomStatus) {
+  case STATUS_HOT:
+  case STATUS_ENERGY_WASTE:
     digitalWrite(LED_PIN, HIGH);
     digitalWrite(BUZZER_PIN, buzzerMuted ? LOW : HIGH);
     break;
-  case NORMAL:
+  case STATUS_NORMAL:
   default:
     digitalWrite(LED_PIN, LOW);
     digitalWrite(BUZZER_PIN, LOW);
-    buzzerMuted =
-        false; // Reset status mute otomatis saat kondisi kembali normal
+    buzzerMuted = false; // Clear the dashboard mute once the room is normal
     break;
   }
 
-  // --- 4. PUBLISH STATUS SAAT BERUBAH ---
-  // Hanya kode status yang dikirim; topik alert dihapus karena isinya selalu
-  // bisa diturunkan dari status. Dashboard memetakan kode -> teks yang bisa
-  // diubah pengguna. retained=true agar dashboard yang baru terhubung langsung
-  // menerima kondisi terakhir.
-  if (isPublishingEnabled && (int)statusRuangan != statusTerakhirDikirim) {
-    if (kirim(TOPIK("status"), namaStatus(statusRuangan), true)) {
-      statusTerakhirDikirim = (int)statusRuangan;
+  // --- 4. PUBLISH STATUS ON CHANGE ---
+  // Only the status code is sent; the alert topic was removed because its
+  // content could always be derived from the status. The dashboard maps code ->
+  // text, so wording stays editable there. retained=true so a dashboard that
+  // connects later immediately receives the current condition.
+  if (isPublishingEnabled && (int)roomStatus != lastSentStatus) {
+    if (publishMessage(TOPIC("status"), statusCode(roomStatus), true)) {
+      lastSentStatus = (int)roomStatus;
     }
   }
 
-  // --- 5. PUBLISH DATA SENSOR KE BROKER MQTT SESUAI INTERVAL ---
-  if (isPublishingEnabled &&
-      (currentMillis - lastPublishTime >= intervalPublish)) {
-    lastPublishTime = currentMillis;
+  // --- 5. PUBLISH SENSOR DATA TO THE MQTT BROKER ON INTERVAL ---
+  if (isPublishingEnabled && (now - lastPublishMs >= publishIntervalMs)) {
+    lastPublishMs = now;
 
-    kirim(TOPIK("suhu"), String(suhu, 1), true);
-    kirim(TOPIK("kelembaban"), String(kelembaban, 1), true);
-    kirim(TOPIK("cahaya"), String(nilaiLDR), true);
-    kirim(TOPIK("gerakan"), adaOrang ? "ON" : "OFF", true);
+    publishMessage(TOPIC("temperature"), String(temperature, 1), true);
+    publishMessage(TOPIC("humidity"), String(humidity, 1), true);
+    publishMessage(TOPIC("light"), String(lightLevel), true);
+    publishMessage(TOPIC("motion"), someonePresent ? "ON" : "OFF", true);
 
-    // Tampilkan juga di Serial Monitor untuk pemantauan simulasi
-    Serial.println("--- Data Terkirim ke MQTT ---");
-    Serial.printf("Suhu: %.1f C | Lembab: %.1f %% | LDR: %d | PIR: %d\n", suhu,
-                  kelembaban, nilaiLDR, gerakan);
-    Serial.printf("Status Fusi: %s (%s)\n", namaStatus(statusRuangan),
-                  pesanStatus(statusRuangan));
+    // Also show it on the Serial Monitor for simulation monitoring
+    Serial.println("--- Data published to MQTT ---");
+    Serial.printf("Temp: %.1f C | Humidity: %.1f %% | LDR: %d | PIR: %d\n",
+                  temperature, humidity, lightLevel, motion);
+    Serial.printf("Fusion status: %s (%s)\n", statusCode(roomStatus),
+                  statusDescription(roomStatus));
   }
 }
