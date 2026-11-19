@@ -9,63 +9,62 @@ or while the dev server is running.
 
 ## Toolchain
 
-Node 22 and npm come from this directory's Nix flake. From the repository root:
+Everything runs in Podman; no host Node installation is needed. The scripts in
+`../scripts/` are the entry points, and `../containers/dashboard/Containerfile`
+defines the image:
 
-```bash
-nix develop ./dashboard
-```
-
-Or from this directory:
-
-```bash
-nix develop
-```
+- **development** runs `node:22-alpine` with this directory mounted and Vite on
+  port 8080;
+- **deployment** builds the static site with Node and serves it from
+  `nginx:alpine` on port 8080.
 
 JavaScript dependencies are pinned in `package.json` and `package-lock.json`.
-The firmware has its own separate flake at `firmware/flake.nix`.
+`node_modules/` and `dist/` are generated and gitignored.
 
 ## Run
 
+From the repository root:
+
 ```bash
-cd dashboard
-npm install
-npm run dev
+scripts/dashboard.sh dev
 ```
 
-Open <http://localhost:8080>. The dev server must be reached over HTTP, not by
-opening `index.html` from `file://`, because MQTT over WebSockets needs a normal
+Open <http://localhost:8080>. The first start runs `npm ci` inside the
+container. The dev server must be reached over HTTP, not by opening
+`index.html` from `file://`, because MQTT over WebSockets needs a normal
 browser origin.
 
-## Build
+## Build and deploy
 
 ```bash
-cd dashboard
-npm run build        # static site in dist/
-npm run preview      # serve dist/ on port 8080
+scripts/dashboard.sh build     # localhost/comfortroom-dashboard:latest
+scripts/dashboard.sh serve     # run it on port 8080
+scripts/dashboard.sh stop
 ```
 
-Or build the static site through Nix (from the repository root):
+For a long-running deployment, install the Podman Quadlet units from
+`../deploy/` into the systemd user session:
 
 ```bash
-nix build ./dashboard#dashboard
-python3 -m http.server 8080 --directory result
+scripts/deploy.sh install      # builds the image, enables mqtt + dashboard
+scripts/deploy.sh status
+scripts/deploy.sh logs
+scripts/deploy.sh uninstall
 ```
 
-Or from this directory:
+On a headless machine, run `loginctl enable-linger "$USER"` once so the user
+services start at boot.
+
+After changing JavaScript dependencies, update the lockfile inside the
+container:
 
 ```bash
-nix build
+scripts/dashboard.sh shell
+npm install
 ```
 
-`dist/` and `node_modules/` are generated and gitignored. After changing
-JavaScript dependencies, update the lockfile with `npm install` and refresh the
-flake hash:
-
-```bash
-nix run nixpkgs#prefetch-npm-deps -- dashboard/package-lock.json
-```
-
-Put the resulting hash in `dashboard/flake.nix` (`npmDepsHash`).
+The next image build uses `npm ci` against the updated
+`package-lock.json`.
 
 ## Simulate the device
 
@@ -73,24 +72,25 @@ No ESP32 required. This publishes synthetic telemetry to the local broker in a
 loop, cycling through `NORMAL`, `HOT`, and `ENERGY_WASTE`:
 
 ```bash
-cd dashboard
-npm run simulate
+scripts/mqtt.sh up
+scripts/dashboard.sh simulate
 ```
 
-Optional overrides:
+The simulator container uses host networking, so it reaches the broker at
+`127.0.0.1:1883`. Optional overrides:
 
 ```bash
 MQTT_URL=mqtt://127.0.0.1:1883 \
 DEVICE_ID=comfortroom-8f2c41d6-9a3b-4e57-b0d2-6c5a7e19f408 \
 INTERVAL_MS=3000 \
-npm run simulate
+scripts/dashboard.sh simulate
 ```
 
 `Ctrl+C` publishes `availability=offline` before exiting.
 
 ## Connect
 
-The defaults match the local `mosquitto.service`:
+The defaults match the local broker container started by `scripts/mqtt.sh up`:
 
 | Setting | Default |
 |---|---|
@@ -98,7 +98,8 @@ The defaults match the local `mosquitto.service`:
 | Device ID | the `DEVICE_ID` in `firmware/ComfortRoom/ComfortRoom.ino` |
 
 The firmware uses plain MQTT on port 1883; browsers use MQTT over WebSockets on
-port 9001. Mosquitto needs both listeners, for example:
+port 9001. The broker listens on both, as configured in
+`../containers/mosquitto/mosquitto.conf`:
 
 ```conf
 listener 1883 0.0.0.0
@@ -108,11 +109,6 @@ listener 9001 0.0.0.0
 protocol websockets
 allow_anonymous true
 ```
-
-On NixOS these are configured in the host's `configuration.nix`;
-apply changes with `sudo nixos-rebuild switch --flake /etc/nixos#<host>`.
-The NixOS module also loads an ACL plugin, so each listener needs
-`acl = [ "topic readwrite #" ]`; an empty ACL denies all traffic.
 
 The page connects automatically. Use **Settings** to change the broker or device
 ID; both are remembered in `localStorage`.
@@ -180,4 +176,4 @@ Things worth knowing:
 | `src/styles.css` | Layout and theme |
 | `vite.config.js` | Vite + Solid plugin, port 8080, relative asset base |
 | `scripts/simulate.mjs` | Standalone MQTT telemetry simulator |
-| `flake.nix` / `flake.lock` | Node toolchain and static-site build |
+| `../containers/dashboard/` | Node build + nginx runtime image |

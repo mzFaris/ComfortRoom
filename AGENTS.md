@@ -1,25 +1,26 @@
 # AGENTS.md
 
-Two projects, each with its own flake: the ESP32 firmware in `firmware/ComfortRoom/` (single sketch) and a SolidJS + Vite dashboard in `dashboard/`. There is no root flake; run `nix develop ./firmware` or `nix develop ./dashboard` from the repo root. No test suite, linter, or CI; a successful firmware compile and dashboard build are the only automated checks.
+Two projects, each with its own container image: the ESP32 firmware in `firmware/ComfortRoom/` (single sketch) and a SolidJS + Vite dashboard in `dashboard/`. Toolchains, the broker and deployment all run through Podman; `podman` is the only host dependency (plus a USB serial port for flashing). No test suite, linter, or CI; a successful firmware compile and dashboard build are the only automated checks.
 
 ## Build, flash, verify
 
-- One-time setup: `arduino-cli core install esp32:esp32`, then `arduino-cli lib install "DHT sensor library" PubSubClient "Adafruit Unified Sensor" ESP32_WiFi_Connect`. Without the sensor/MQTT libraries the compile fails with `fatal error: DHT.h: No such file or directory`. `firmware/flake.nix` provides `arduino-cli` and `mosquitto`, so `nix develop ./firmware -c arduino-cli ...` works without a global install.
-- `ESP32_WiFi_Connect` also needs ESPAsyncWebServer + AsyncTCP, but the Arduino index versions (ESPAsyncWebServer 3.1.0, AsyncTCP 1.1.4) fail on ESP32 core 3.x with `mbedtls_md5_*_ret` errors. Use the maintained ESP32Async forks instead: `arduino-cli lib uninstall ESPAsyncWebServer AsyncTCP ESPAsyncTCP`, then `git clone --depth 1 https://github.com/ESP32Async/AsyncTCP.git ~/Arduino/libraries/AsyncTCP` and `git clone --depth 1 https://github.com/ESP32Async/ESPAsyncWebServer.git ~/Arduino/libraries/ESPAsyncWebServer`. Verified with AsyncTCP 3.6.1 and ESPAsyncWebServer 3.13.0 in the default user libraries directory.
-- Compile (verified, from the repo root): `arduino-cli compile --fqbn esp32:esp32:esp32 firmware/ComfortRoom` — generic ESP32 Dev Module; change the FQBN if the board changes.
-- Upload: `arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32 firmware/ComfortRoom`
-- Serial Monitor: 115200 baud.
+- Toolchain image: `containers/firmware/Containerfile` (Debian slim + `arduino-cli` + ESP32 core `esp32:esp32` + the sketch libraries). `scripts/firmware.sh` builds `localhost/comfortroom-firmware:latest` on first use. No host `arduino-cli` install is needed. Without the sensor/MQTT libraries baked into the image the compile fails with `fatal error: DHT.h: No such file or directory`.
+- `ESP32_WiFi_Connect` also needs ESPAsyncWebServer + AsyncTCP. The Arduino index versions (ESPAsyncWebServer 3.1.0, AsyncTCP 1.1.4) fail on ESP32 core 3.x with `mbedtls_md5_*_ret` errors, so the Containerfile uninstalls them and clones the maintained ESP32Async forks instead (verified in-container with AsyncTCP 3.6.1 / ESPAsyncWebServer 3.13.0). Change the Containerfile to update them; do not hand-install libraries into the image.
+- Compile (verified, from the repo root): `scripts/firmware.sh compile`. Equivalent to `podman run --rm -it -v "$PWD:/workspace:Z" -w /workspace localhost/comfortroom-firmware:latest arduino-cli compile --fqbn esp32:esp32:esp32 firmware/ComfortRoom` — generic ESP32 Dev Module; set `FQBN` to change the board.
+- Upload: `scripts/firmware.sh upload` (board at `/dev/ttyUSB0`; override with `TTY_DEV=...`). The script passes the serial device into the container with `--device`. If rootless Podman reports a permission error on the port, add `--group-add keep-groups` to the `run_tool` call in `scripts/firmware.sh`.
+- Serial Monitor: `scripts/firmware.sh monitor` (115200 baud by default; override with `BAUD=...`).
+- `scripts/firmware.sh shell` opens a shell inside the toolchain image. Compile artifacts are cached in the `comfortroom-firmware-cache` Podman volume; remove it with `podman volume rm comfortroom-firmware-cache` if a build looks stale.
 - The sketch path is `firmware/ComfortRoom/ComfortRoom.ino`; Arduino requires the folder name (`ComfortRoom`) to match the `.ino`, so do not flatten it to `firmware/ComfortRoom.ino`.
 
 ## Dashboard (`dashboard/`)
 
 - SolidJS + Vite, source in `dashboard/src/` (`src/App.jsx` owns the store, MQTT lifecycle, and commands). Vite entry is `dashboard/index.html`; MQTT.js is bundled from npm, not a CDN.
-- Toolchain comes from `dashboard/flake.nix` / `dashboard/flake.lock`: `nix develop ./dashboard` provides Node 22 and npm. JavaScript dependencies are pinned by `dashboard/package.json` + `dashboard/package-lock.json`; `node_modules/` and `dist/` are generated and gitignored.
-- Dev server (port 8080): `cd dashboard && npm install && npm run dev`. Do not open `index.html` from `file://`; MQTT over WebSockets needs an HTTP origin.
-- Production build: `cd dashboard && npm run build` (static site in `dashboard/dist/`). The dashboard flake also builds it: `nix build ./dashboard#dashboard` (or `cd dashboard && nix build`), then serve the resulting `result/` (e.g. `python3 -m http.server 8080 --directory result`).
-- After changing JS dependencies, run `npm install` to update `dashboard/package-lock.json` and refresh `npmDepsHash` in `dashboard/flake.nix` with `nix run nixpkgs#prefetch-npm-deps -- dashboard/package-lock.json`.
-- MQTT runs on the local `mosquitto.service`: firmware on `<host>:1883` (plain TCP), browsers on `ws://<page-host>:9001/mqtt` (WebSockets). The dashboard derives the host from the page origin; the firmware uses the LAN IP in `mqtt_server`. Both listeners must bind `0.0.0.0` and be allowed through the firewall; on NixOS they live in the host's `configuration.nix` (`sudo nixos-rebuild switch --flake /etc/nixos#<host>`). The NixOS mosquitto module always loads an ACL plugin, and an empty ACL denies all traffic, so each listener also needs `acl = [ "topic readwrite #" ]`.
-- `cd dashboard && npm run simulate` publishes synthetic retained telemetry (`NORMAL` → `HOT` → `ENERGY_WASTE`) to the local broker without an ESP32. Override with `MQTT_URL`, `DEVICE_ID`, `INTERVAL_MS`, `MOTION_HOLD_MS`; `Ctrl+C` publishes availability `offline`.
+- Toolchain: `containers/dashboard/Containerfile` builds the site with Node 22 (`node:22-alpine`) and serves it with `nginx:alpine` on port 8080. JavaScript dependencies are pinned by `dashboard/package.json` + `dashboard/package-lock.json`; `node_modules/` and `dist/` are generated and gitignored. Only Podman is required on the host.
+- Dev server (port 8080): `scripts/dashboard.sh dev`. It runs in the Node container with `dashboard/` mounted, installs dependencies with `npm ci` when `node_modules/` is missing, and starts `vite --host 0.0.0.0`. Do not open `index.html` from `file://`; MQTT over WebSockets needs an HTTP origin.
+- Production build: `scripts/dashboard.sh build` creates `localhost/comfortroom-dashboard:latest`; `scripts/dashboard.sh serve` runs it on port 8080. For an auto-starting deployment, `scripts/deploy.sh install` builds the image and installs the Quadlet units from `deploy/` into the systemd user session (`scripts/deploy.sh uninstall|status|logs`).
+- After changing JS dependencies, run `npm install` inside the container (`scripts/dashboard.sh shell`) to update `dashboard/package-lock.json`; the next image build (`npm ci`) picks it up.
+- MQTT runs in the `comfortroom-mqtt` container (`scripts/mqtt.sh up`), image `eclipse-mosquitto:2`, config `containers/mosquitto/mosquitto.conf`: firmware on `<host>:1883` (plain TCP), browsers on `ws://<page-host>:9001/mqtt` (WebSockets). The dashboard derives the host from the page origin; the firmware uses the LAN IP in `mqtt_server`. Both listeners bind `0.0.0.0`, so open ports 1883 and 9001 on the host firewall. The broker is unauthenticated; keep it on a trusted LAN.
+- `scripts/dashboard.sh simulate` publishes synthetic retained telemetry (`NORMAL` → `HOT` → `ENERGY_WASTE`) to the local broker without an ESP32. Override with `MQTT_URL`, `DEVICE_ID`, `INTERVAL_MS`, `MOTION_HOLD_MS`; `Ctrl+C` publishes availability `offline`.
 - `dashboard/src/constants.js` hardcodes the default device ID (`DEFAULT_DEVICE_ID`). Changing `DEVICE_ID` in the sketch requires changing that default too; per-browser broker/device overrides persist in `localStorage`.
 - The dashboard owns all human-readable wording. Add status, error, and command mappings in `dashboard/src/constants.js` and use them in the components in the same release as the firmware change.
 
@@ -64,7 +65,14 @@ Subscribes to `<id>/room/control/#`:
 
 The dashboard maps every code — status and error — to the wording it wants. Numeric payloads carry no unit; `°C` and friends are added by the dashboard. Adding a status or error code means adding it to the dashboard mapping in the same release.
 
-Manual check: `mosquitto_sub -h <broker-ip> -v -t '<id>/room/#'` while publishing to a `control/...` topic with `mosquitto_pub`.
+Manual check (no host Mosquitto clients needed):
+
+```bash
+podman run --rm --network host docker.io/library/eclipse-mosquitto:2 \
+  mosquitto_sub -h 127.0.0.1 -v -t '<id>/room/#'
+podman run --rm --network host docker.io/library/eclipse-mosquitto:2 \
+  mosquitto_pub -h 127.0.0.1 -t '<id>/room/control/publish' -m ON
+```
 
 Do not rename topics or payload values without updating the dashboard.
 

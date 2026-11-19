@@ -8,27 +8,44 @@ same topics, charts the readings, and sends control commands back.
 ```
 firmware/ComfortRoom/   ESP32 sketch (Arduino)
 dashboard/              SolidJS + Vite dashboard
+containers/             Podman images for the firmware toolchain, dashboard, broker
+scripts/                Podman entry points for development and deployment
+deploy/                 Quadlet units for a systemd user deployment
 ```
+
+Everything runs through Podman. Only `podman` is required on the host; Node,
+`arduino-cli` and Mosquitto live in images.
 
 ## Quick start
 
-Firmware (needs `arduino-cli`; see `AGENTS.md` for the one-time library setup):
+Firmware — the first run builds the toolchain image (ESP32 core + libraries), so
+it takes a while and downloads about 2 GB; the resulting image is roughly 10 GB
+because it carries the ESP32 toolchains for every target.
 
 ```bash
-arduino-cli compile --fqbn esp32:esp32:esp32 firmware/ComfortRoom
-arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32 firmware/ComfortRoom
+scripts/firmware.sh compile
+scripts/firmware.sh upload     # /dev/ttyUSB0; override with TTY_DEV=...
+scripts/firmware.sh monitor
 ```
 
 Dashboard:
 
 ```bash
-cd dashboard
-npm install
-npm run dev        # http://localhost:8080
+scripts/mqtt.sh up             # broker: 1883 (MQTT) + 9001 (WebSockets)
+scripts/dashboard.sh dev       # http://localhost:8080
 ```
 
-No ESP32 at hand? `cd dashboard && npm run simulate` publishes synthetic
-telemetry to a local broker.
+No ESP32 at hand? `scripts/dashboard.sh simulate` publishes synthetic telemetry
+to the local broker.
+
+Deployment — build the image and install the broker + dashboard as systemd user
+services (Podman Quadlets):
+
+```bash
+scripts/deploy.sh install      # start now and on login
+scripts/deploy.sh status
+scripts/deploy.sh uninstall
+```
 
 ## MQTT
 
@@ -40,10 +57,11 @@ Every topic is namespaced by device ID (`comfortroom-<uuid>`):
 Payloads are machine-readable codes, not prose; the dashboard owns all
 human-readable wording. The exact contract is in [`AGENTS.md`](AGENTS.md).
 
-Point `mqtt_server` in the sketch at the machine running your broker, and make
-sure that broker exposes plain MQTT on `1883` for the device and MQTT over
-WebSockets on `9001` for browsers. The example configuration uses an
-unauthenticated broker on a trusted LAN — use a unique device UUID per unit.
+The local broker is `containers/mosquitto/mosquitto.conf`, run by
+`scripts/mqtt.sh up`: plain MQTT on `1883` for the device and MQTT over
+WebSockets on `9001` for browsers. Point `mqtt_server` in the sketch at the
+machine running the broker and open both ports in its firewall. The example
+broker is unauthenticated on a trusted LAN — use a unique device UUID per unit.
 
 ## More
 
