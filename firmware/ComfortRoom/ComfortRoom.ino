@@ -1,4 +1,5 @@
 #include <DHT.h>
+#include <ESP32_WiFi_Connect.h>
 #include <PubSubClient.h>
 #include <WiFi.h>
 
@@ -13,10 +14,10 @@
 DHT dht(DHT_PIN, DHT_TYPE);
 
 // --- DEVICE IDENTITY (MQTT topic namespace) ---
-// Every topic is prefixed with a per-device namespace: comfortroom-<uuid>/room/...
-// The broker (broker.hivemq.com) is public and shared, so this prefix is what
-// keeps other devices from reading our data or sending us commands.
-// Use a different UUID for each physical unit.
+// Every topic is prefixed with a per-device namespace:
+// comfortroom-<uuid>/room/... The local mosquitto broker is shared on the LAN,
+// so this prefix is what keeps other devices from reading our data or sending
+// us commands. Use a different UUID for each physical unit.
 #define DEVICE_ID "comfortroom-8f2c41d6-9a3b-4e57-b0d2-6c5a7e19f408"
 #define TOPIC_PREFIX DEVICE_ID "/room/"
 
@@ -26,36 +27,45 @@ DHT dht(DHT_PIN, DHT_TYPE);
 #define TOPIC(path) (TOPIC_PREFIX path)
 
 // --- WIFI & MQTT CONFIGURATION ---
-// Placeholders: fill in your own WiFi credentials before uploading.
-// For the Wokwi simulator use ssid "Wokwi-GUEST" and password "".
-const char *ssid = "YOUR_WIFI_SSID";
-const char *password = "YOUR_WIFI_PASSWORD";
-const char *mqtt_server = "broker.hivemq.com";
+// WiFi credentials are configured at runtime through ESP32_WiFi_Connect's
+// access point and stored in NVS, so none are hardcoded here. The manager is
+// always in AP+STA mode; while WiFi is down, connect to the "EasyESP-XXXXXX"
+// network and open http://EasyESP-XXXXXX.local/ (or http://192.168.4.1/).
+// LAN address of the machine running mosquitto.service. Update this if DHCP
+// assigns the host a different address.
+const char *mqtt_server = "192.168.1.16";
 const int mqtt_port = 1883;
 
 WiFiClient espClient;
+ESP32_WiFi_Connect wifiConnect;
 
 // --- CONTROL PARAMETERS & STATE ---
-float tempThreshold = 30.0;  // Temperature that counts as hot (degrees Celsius)
-int lightThreshold = 2000;   // LDR ADC threshold (0 - 4095)
+float tempThreshold = 30.0; // Temperature that counts as hot (degrees Celsius)
+int lightThreshold = 2000;  // LDR ADC threshold (0 - 4095)
 unsigned long noMotionHoldMs =
     10000; // 10 s without motion means the room is empty (simulation value)
 unsigned long publishIntervalMs = 3000; // Telemetry interval (3 s)
 
 // Accepted value ranges for dashboard commands (command validation)
-const float TEMP_THRESHOLD_MAX = 100.0;            // degrees Celsius
-const int LIGHT_THRESHOLD_MIN = 0;                 // ADC lower bound
-const int LIGHT_THRESHOLD_MAX = 4095;              // ADC upper bound
-const unsigned long NO_MOTION_HOLD_MIN_SEC = 1;    // seconds
-const unsigned long NO_MOTION_HOLD_MAX_SEC = 3600; // seconds
-const unsigned long PUBLISH_INTERVAL_MIN_SEC = 1;  // seconds
+const float TEMP_THRESHOLD_MAX = 100.0;              // degrees Celsius
+const int LIGHT_THRESHOLD_MIN = 0;                   // ADC lower bound
+const int LIGHT_THRESHOLD_MAX = 4095;                // ADC upper bound
+const unsigned long NO_MOTION_HOLD_MIN_SEC = 1;      // seconds
+const unsigned long NO_MOTION_HOLD_MAX_SEC = 3600;   // seconds
+const unsigned long PUBLISH_INTERVAL_MIN_SEC = 1;    // seconds
 const unsigned long PUBLISH_INTERVAL_MAX_SEC = 3600; // seconds
 
 bool isPublishingEnabled = true; // Whether telemetry publishing is active
-bool buzzerMuted = false;        // Buzzer muted from the dashboard
+bool buzzerMuted = false;        // Persistent mute: stays off until unmuted
+bool buzzerSilenced = false;     // Transient silence: cleared when the room is normal
 
 unsigned long lastPublishMs = 0;
 unsigned long lastMotionMs = 0;
+unsigned long lastWifiRetryMs = 0;
+unsigned long lastMqttAttemptMs = 0;
+
+const unsigned long WIFI_RETRY_INTERVAL_MS = 30000; // STA reconnect retry period
+const unsigned long MQTT_RETRY_INTERVAL_MS = 3000;  // Broker reconnect retry period
 
 // --- ROOM STATUS (sensor fusion result) ---
 // Kept as an enum so only three conditions can exist. Only the CODE produced by
@@ -162,7 +172,7 @@ void handleMessage(char *topic, byte *payload, unsigned int length) {
   }
   String command = incomingTopic.substring(strlen(controlPrefix));
 
-  // 1. Buzzer control (e.g. control/buzzer = OFF)
+  // 1. Persistent mute (e.g. control/buzzer = OFF)
   if (command == "buzzer") {
     if (text.equalsIgnoreCase("OFF")) {
       buzzerMuted = true;
@@ -175,7 +185,22 @@ void handleMessage(char *topic, byte *payload, unsigned int length) {
       queueAck("buzzer|FAILED|E_TOKEN");
     }
   }
-  // 2. Change the temperature threshold (e.g. control/temp_threshold = 32)
+  // 2. Silence the current alarm (e.g. control/silence = ON)
+  // Unlike the mute, this is cleared automatically when the room becomes normal,
+  // so the next alert sounds again.
+  else if (command == "silence") {
+    if (text.equalsIgnoreCase("ON")) {
+      buzzerSilenced = true;
+      digitalWrite(BUZZER_PIN, LOW);
+      queueAck("silence|OK");
+    } else if (text.equalsIgnoreCase("OFF")) {
+      buzzerSilenced = false;
+      queueAck("silence|OK");
+    } else {
+      queueAck("silence|FAILED|E_TOKEN");
+    }
+  }
+  // 3. Change the temperature threshold (e.g. control/temp_threshold = 32)
   else if (command == "temp_threshold") {
     float newTemperature = 0;
     if (!parseDecimal(text, newTemperature)) {
@@ -187,7 +212,7 @@ void handleMessage(char *topic, byte *payload, unsigned int length) {
       queueAck(String("temp_threshold|OK|") + String(tempThreshold, 1));
     }
   }
-  // 3. Enable/disable telemetry publishing (e.g. control/publish = OFF)
+  // 4. Enable/disable telemetry publishing (e.g. control/publish = OFF)
   else if (command == "publish") {
     if (text.equalsIgnoreCase("OFF")) {
       isPublishingEnabled = false;
@@ -201,7 +226,7 @@ void handleMessage(char *topic, byte *payload, unsigned int length) {
       queueAck("publish|FAILED|E_TOKEN");
     }
   }
-  // 4. Change the publish interval in seconds (e.g. control/interval = 5)
+  // 5. Change the publish interval in seconds (e.g. control/interval = 5)
   else if (command == "interval") {
     long newSeconds = 0;
     if (!parseInteger(text, newSeconds)) {
@@ -214,7 +239,7 @@ void handleMessage(char *topic, byte *payload, unsigned int length) {
       queueAck(String("interval|OK|") + String(newSeconds));
     }
   }
-  // 5. Change the no-motion hold in seconds (e.g. control/motion_hold = 15)
+  // 6. Change the no-motion hold in seconds (e.g. control/motion_hold = 15)
   else if (command == "motion_hold") {
     long newSeconds = 0;
     if (!parseInteger(text, newSeconds)) {
@@ -227,7 +252,7 @@ void handleMessage(char *topic, byte *payload, unsigned int length) {
       queueAck(String("motion_hold|OK|") + String(newSeconds));
     }
   }
-  // 6. Change the LDR light threshold (e.g. control/light_threshold = 2500)
+  // 7. Change the LDR light threshold (e.g. control/light_threshold = 2500)
   else if (command == "light_threshold") {
     long newValue = 0;
     if (!parseInteger(text, newValue)) {
@@ -240,7 +265,7 @@ void handleMessage(char *topic, byte *payload, unsigned int length) {
       queueAck(String("light_threshold|OK|") + String(lightThreshold));
     }
   }
-  // 7. Unknown command: report it instead of staying silent
+  // 8. Unknown command: report it instead of staying silent
   else {
     queueAck(command + "|FAILED|E_UNKNOWN");
   }
@@ -284,72 +309,37 @@ void flushAckQueue() {
   }
 }
 
-void connectWiFi() {
-  Serial.print("Connecting to WiFi ");
-  Serial.println(ssid);
-
-  WiFi.begin(ssid, password);
-
-  // Bounded to 20 s so the sketch cannot hang while the placeholders are still
-  // unfilled; retries are handled by connectMQTT() in loop().
-  unsigned long startedAt = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startedAt < 20000) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi connected! IP: " + WiFi.localIP().toString());
-  } else {
-    Serial.println(
-        "\nWiFi connection failed. Check ssid/password (still placeholders?)");
-  }
-}
-
+// One MQTT connection attempt; loop() calls this again on failure so that the
+// WiFi config portal stays responsive while the broker is unreachable.
 void connectMQTT() {
-  while (!client.connected()) {
-    // WiFi can drop before MQTT does, so reconnect it first
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("WiFi lost, reconnecting...");
-      WiFi.reconnect();
-      unsigned long startedAt = millis();
-      while (WiFi.status() != WL_CONNECTED && millis() - startedAt < 10000) {
-        delay(500);
-        Serial.print(".");
-      }
-      if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("\nWiFi still down, retrying in 3 s...");
-        delay(3000);
-        continue;
-      }
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  Serial.print("Connecting to MQTT broker...");
+  String clientId = "ESP32-SmartRoom-" + String(random(0xffff), HEX);
+
+  // Last will and testament: the broker announces "offline" (retained) if the
+  // device dies unexpectedly, so the dashboard never shows stale data.
+  // "online" on the availability topic already signals readiness, so no extra
+  // ack is needed here.
+  if (client.connect(clientId.c_str(), TOPIC("availability"), 1, true,
+                     "offline")) {
+    Serial.println("connected!");
+
+    if (!client.subscribe(TOPIC("control/#"))) {
+      Serial.println("Warning: failed to subscribe to " +
+                     String(TOPIC("control/#")));
     }
 
-    Serial.print("Connecting to MQTT broker...");
-    String clientId = "ESP32-SmartRoom-" + String(random(0xffff), HEX);
+    publishMessage(TOPIC("availability"), "online", true);
 
-    // Last will and testament: the broker announces "offline" (retained) if the
-    // device dies unexpectedly, so the dashboard never shows stale data.
-    // "online" on the availability topic already signals readiness, so no extra
-    // ack is needed here.
-    if (client.connect(clientId.c_str(), TOPIC("availability"), 1, true,
-                       "offline")) {
-      Serial.println("connected!");
-
-      if (!client.subscribe(TOPIC("control/#"))) {
-        Serial.println("Warning: failed to subscribe to " +
-                       String(TOPIC("control/#")));
-      }
-
-      publishMessage(TOPIC("availability"), "online", true);
-
-      // Force a status resend after reconnecting
-      lastSentStatus = -1;
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" retrying in 3 s...");
-      delay(3000);
-    }
+    // Force a status resend after reconnecting
+    lastSentStatus = -1;
+  } else {
+    Serial.print("failed, rc=");
+    Serial.print(client.state());
+    Serial.println(" retrying...");
   }
 }
 
@@ -364,7 +354,12 @@ void setup() {
   digitalWrite(LED_PIN, LOW);
 
   dht.begin();
-  connectWiFi();
+  // Loads saved credentials and connects STA if configured; otherwise starts
+  // the configuration access point. Always leaves the AP config portal up.
+  // In Wokwi, uncomment the next line to seed its open network on a fresh NVS:
+  // wifiConnect.setDefaultWiFi("Wokwi-GUEST", "");
+  wifiConnect.begin();
+  Serial.println("WiFi status: " + wifiConnect.getStatus());
 
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(handleMessage);
@@ -375,16 +370,31 @@ void setup() {
 }
 
 void loop() {
-  // Keep the MQTT connection alive so two-way communication keeps working
-  if (!client.connected()) {
-    connectMQTT();
-  }
-  client.loop();
-
-  // Send queued command confirmations outside the callback
-  flushAckQueue();
+  // The manager's DNS server only runs when polled, so keep the captive portal
+  // reachable even while WiFi/MQTT are down.
+  wifiConnect.keepAlive();
 
   unsigned long now = millis();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    // Keep MQTT alive; retry at a fixed rate instead of blocking loop().
+    if (!client.connected() &&
+        now - lastMqttAttemptMs >= MQTT_RETRY_INTERVAL_MS) {
+      lastMqttAttemptMs = now;
+      connectMQTT();
+    }
+    if (client.connected()) {
+      client.loop();
+      // Send queued command confirmations outside the callback
+      flushAckQueue();
+    }
+  } else if (wifiConnect.isConfigured() &&
+             now - lastWifiRetryMs >= WIFI_RETRY_INTERVAL_MS) {
+    // The manager retries only during begin(); retry a configured STA that
+    // drops later. While unconfigured, the config portal is the only path.
+    lastWifiRetryMs = now;
+    WiFi.reconnect();
+  }
 
   // --- 1. READ ALL THREE SENSORS ---
   float temperature = dht.readTemperature();
@@ -424,13 +434,15 @@ void loop() {
   case STATUS_HOT:
   case STATUS_ENERGY_WASTE:
     digitalWrite(LED_PIN, HIGH);
-    digitalWrite(BUZZER_PIN, buzzerMuted ? LOW : HIGH);
+    digitalWrite(BUZZER_PIN, (buzzerMuted || buzzerSilenced) ? LOW : HIGH);
     break;
   case STATUS_NORMAL:
   default:
     digitalWrite(LED_PIN, LOW);
     digitalWrite(BUZZER_PIN, LOW);
-    buzzerMuted = false; // Clear the dashboard mute once the room is normal
+    // End the transient silence with the current alarm. The persistent mute is
+    // intentionally kept: only the dashboard can turn it back on.
+    buzzerSilenced = false;
     break;
   }
 
@@ -439,14 +451,16 @@ void loop() {
   // content could always be derived from the status. The dashboard maps code ->
   // text, so wording stays editable there. retained=true so a dashboard that
   // connects later immediately receives the current condition.
-  if (isPublishingEnabled && (int)roomStatus != lastSentStatus) {
+  if (client.connected() && isPublishingEnabled &&
+      (int)roomStatus != lastSentStatus) {
     if (publishMessage(TOPIC("status"), statusCode(roomStatus), true)) {
       lastSentStatus = (int)roomStatus;
     }
   }
 
   // --- 5. PUBLISH SENSOR DATA TO THE MQTT BROKER ON INTERVAL ---
-  if (isPublishingEnabled && (now - lastPublishMs >= publishIntervalMs)) {
+  if (client.connected() && isPublishingEnabled &&
+      (now - lastPublishMs >= publishIntervalMs)) {
     lastPublishMs = now;
 
     publishMessage(TOPIC("temperature"), String(temperature, 1), true);
