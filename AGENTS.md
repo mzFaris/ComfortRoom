@@ -25,10 +25,10 @@ Two projects, each with its own flake: the ESP32 firmware in `firmware/ComfortRo
 
 ## Conventions
 
-- Identifiers, comments, serial log text, MQTT topics and payloads are English; keep new ones consistent. Payloads are **codes**, not prose (see the contract below).
+- Identifiers, serial log text, MQTT topics and payloads are English; keep new ones consistent. Payloads are **codes**, not prose (see the contract below).
 - WiFi credentials are configured at runtime by `ESP32_WiFi_Connect`, never in the sketch: `wifiConnect.begin()` (setup) loads NVS credentials, or starts the `EasyESP-<chipid>` AP with a config page at `http://EasyESP-<chipid>.local/` or `http://192.168.4.1/`. The library always runs AP+STA, and saving credentials reboots the board. Do not add `ssid`/`password` constants or call `setDefaultWiFi()` with real credentials.
 - `wifiConnect.keepAlive()` must run every `loop()` iteration — it drives the portal's DNS server. The library only retries the STA connection inside `begin()`, so `loop()` calls `WiFi.reconnect()` every 30 s when a configured station drops. MQTT connection attempts are separately rate-limited to every 3 s; do not restore the old blocking reconnect loop or the portal becomes unresponsive.
-- LDR polarity is simulator/hardware-dependent: `lightLevel < lightThreshold` means bright (see the comment near `roomIsBright`).
+- LDR polarity is simulator/hardware-dependent: `lightLevel < lightThreshold` means bright (see `roomIsBright`).
 - Internal state is typed (the `RoomStatus` enum, `bool` flags); only the MQTT wire format is text. `statusCode()` is the only mapping used on the air; `statusDescription()` is for the Serial Monitor and must never be published. Never send an enum value or a human-readable sentence over MQTT.
 - Topics are compile-time concatenations via `TOPIC("...")`; avoid runtime `String` topic building.
 - `client.setBufferSize(512)` is deliberate (prefixed topics plus acks exceed the 256-byte default); raise it if topics or payloads grow. Acks are queued (`ACK_QUEUE_SIZE` 4) and flushed from `loop()`, never published from inside the MQTT callback.

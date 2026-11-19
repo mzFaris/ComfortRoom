@@ -3,82 +3,57 @@
 #include <PubSubClient.h>
 #include <WiFi.h>
 
-// --- PIN CONFIGURATION (matches the simulated circuit) ---
-#define PIR_PIN 14    // D14: PIR sensor input
-#define DHT_PIN 27    // D27: DHT11 sensor input
-#define LDR_PIN 34    // D34 (ADC1): LDR analog input
-#define BUZZER_PIN 26 // D26: buzzer output
-#define LED_PIN 4     // D4: external indicator LED
+#define PIR_PIN 14
+#define DHT_PIN 27
+#define LDR_PIN 34
+#define BUZZER_PIN 26
+#define LED_PIN 4
 
 #define DHT_TYPE DHT11
 DHT dht(DHT_PIN, DHT_TYPE);
 
-// --- DEVICE IDENTITY (MQTT topic namespace) ---
-// Every topic is prefixed with a per-device namespace:
-// comfortroom-<uuid>/room/... The local mosquitto broker is shared on the LAN,
-// so this prefix is what keeps other devices from reading our data or sending
-// us commands. Use a different UUID for each physical unit.
 #define DEVICE_ID "comfortroom-8f2c41d6-9a3b-4e57-b0d2-6c5a7e19f408"
 #define TOPIC_PREFIX DEVICE_ID "/room/"
 
-// Topics are concatenated at compile time (adjacent string literals) instead of
-// at runtime, so building one performs no heap allocation:
-// TOPIC("temperature") -> "comfortroom-8f2c.../room/temperature"
 #define TOPIC(path) (TOPIC_PREFIX path)
 
-// --- WIFI & MQTT CONFIGURATION ---
-// WiFi credentials are configured at runtime through ESP32_WiFi_Connect's
-// access point and stored in NVS, so none are hardcoded here. The manager is
-// always in AP+STA mode; while WiFi is down, connect to the "EasyESP-XXXXXX"
-// network and open http://EasyESP-XXXXXX.local/ (or http://192.168.4.1/).
-// LAN address of the machine running mosquitto.service. Update this if DHCP
-// assigns the host a different address.
 const char *mqtt_server = "192.168.1.16";
 const int mqtt_port = 1883;
 
 WiFiClient espClient;
 ESP32_WiFi_Connect wifiConnect;
 
-// --- CONTROL PARAMETERS & STATE ---
-float tempThreshold = 30.0; // Temperature that counts as hot (degrees Celsius)
-int lightThreshold = 2000;  // LDR ADC threshold (0 - 4095)
-unsigned long noMotionHoldMs =
-    10000; // 10 s without motion means the room is empty (simulation value)
-unsigned long publishIntervalMs = 3000; // Telemetry interval (3 s)
+float tempThreshold = 30.0;
+int lightThreshold = 2000;
+unsigned long noMotionHoldMs = 10000;
+unsigned long publishIntervalMs = 3000;
 
-// Accepted value ranges for dashboard commands (command validation)
-const float TEMP_THRESHOLD_MAX = 100.0;              // degrees Celsius
-const int LIGHT_THRESHOLD_MIN = 0;                   // ADC lower bound
-const int LIGHT_THRESHOLD_MAX = 4095;                // ADC upper bound
-const unsigned long NO_MOTION_HOLD_MIN_SEC = 1;      // seconds
-const unsigned long NO_MOTION_HOLD_MAX_SEC = 3600;   // seconds
-const unsigned long PUBLISH_INTERVAL_MIN_SEC = 1;    // seconds
-const unsigned long PUBLISH_INTERVAL_MAX_SEC = 3600; // seconds
+const float TEMP_THRESHOLD_MAX = 100.0;
+const int LIGHT_THRESHOLD_MIN = 0;
+const int LIGHT_THRESHOLD_MAX = 4095;
+const unsigned long NO_MOTION_HOLD_MIN_SEC = 1;
+const unsigned long NO_MOTION_HOLD_MAX_SEC = 3600;
+const unsigned long PUBLISH_INTERVAL_MIN_SEC = 1;
+const unsigned long PUBLISH_INTERVAL_MAX_SEC = 3600;
 
-bool isPublishingEnabled = true; // Whether telemetry publishing is active
-bool buzzerMuted = false;        // Persistent mute: stays off until unmuted
-bool buzzerSilenced = false;     // Transient silence: cleared when the room is normal
+bool isPublishingEnabled = true;
+bool buzzerMuted = false;
+bool buzzerSilenced = false;
 
 unsigned long lastPublishMs = 0;
 unsigned long lastMotionMs = 0;
 unsigned long lastWifiRetryMs = 0;
 unsigned long lastMqttAttemptMs = 0;
 
-const unsigned long WIFI_RETRY_INTERVAL_MS = 30000; // STA reconnect retry period
-const unsigned long MQTT_RETRY_INTERVAL_MS = 3000;  // Broker reconnect retry period
+const unsigned long WIFI_RETRY_INTERVAL_MS = 30000;
+const unsigned long MQTT_RETRY_INTERVAL_MS = 3000;
 
-// --- ROOM STATUS (sensor fusion result) ---
-// Kept as an enum so only three conditions can exist. Only the CODE produced by
-// statusCode() goes over MQTT; the wording shown to users belongs to the
-// dashboard.
 enum RoomStatus : uint8_t { STATUS_NORMAL, STATUS_HOT, STATUS_ENERGY_WASTE };
 
 RoomStatus roomStatus = STATUS_NORMAL;
 
-// Last status that was published (-1 = never sent / force a resend).
 int lastSentStatus = -1;
 
-// Status code published to MQTT. Do not change without updating the dashboard.
 const char *statusCode(RoomStatus status) {
   switch (status) {
   case STATUS_HOT:
@@ -91,7 +66,6 @@ const char *statusCode(RoomStatus status) {
   }
 }
 
-// Description used by the Serial Monitor only; never published to the broker.
 const char *statusDescription(RoomStatus status) {
   switch (status) {
   case STATUS_HOT:
@@ -104,10 +78,6 @@ const char *statusDescription(RoomStatus status) {
   }
 }
 
-// --- ACK QUEUE (command confirmations for the dashboard) ---
-// Confirmations are not published straight from the callback; they are queued
-// and flushed from loop() after client.loop() returns. This avoids publishing
-// while the MQTT buffer is still in use by the incoming message.
 const int ACK_QUEUE_SIZE = 4;
 String ackQueue[ACK_QUEUE_SIZE];
 int ackQueueHead = 0;
@@ -124,9 +94,6 @@ void queueAck(const String &message) {
   ackQueueCount++;
 }
 
-// --- PAYLOAD NUMBER PARSERS (command validation) ---
-// Return false when the payload is empty or contains non-numeric characters, so
-// "abc" is no longer silently treated as 0.
 bool parseInteger(const String &text, long &value) {
   if (text.length() == 0) {
     return false;
@@ -145,13 +112,6 @@ bool parseDecimal(const String &text, float &value) {
   return end != nullptr && *end == '\0';
 }
 
-// --- MQTT CALLBACK (commands coming from the dashboard) ---
-// Ack formats (no prose; user-facing wording is owned by the dashboard):
-//   <command>|OK|<value>      example: temp_threshold|OK|32.0
-//   <command>|FAILED|<code>   example: interval|FAILED|E_RANGE
-// Error codes: E_TOKEN (not ON/OFF), E_NUMBER (not numeric),
-// E_RANGE (outside bounds), E_UNKNOWN (unknown command),
-// E_TOPIC (topic outside control/#).
 void handleMessage(char *topic, byte *payload, unsigned int length) {
   String incomingTopic = String(topic);
   String text = "";
@@ -162,7 +122,6 @@ void handleMessage(char *topic, byte *payload, unsigned int length) {
 
   Serial.println("Incoming command [" + incomingTopic + "]: " + text);
 
-  // Take the command name relative to "<id>/room/control/"
   const char *controlPrefix = TOPIC("control/");
   if (!incomingTopic.startsWith(controlPrefix)) {
     Serial.println("Topic outside " + String(TOPIC("control/#")) + ": " +
@@ -172,7 +131,6 @@ void handleMessage(char *topic, byte *payload, unsigned int length) {
   }
   String command = incomingTopic.substring(strlen(controlPrefix));
 
-  // 1. Persistent mute (e.g. control/buzzer = OFF)
   if (command == "buzzer") {
     if (text.equalsIgnoreCase("OFF")) {
       buzzerMuted = true;
@@ -185,9 +143,7 @@ void handleMessage(char *topic, byte *payload, unsigned int length) {
       queueAck("buzzer|FAILED|E_TOKEN");
     }
   }
-  // 2. Silence the current alarm (e.g. control/silence = ON)
-  // Unlike the mute, this is cleared automatically when the room becomes normal,
-  // so the next alert sounds again.
+
   else if (command == "silence") {
     if (text.equalsIgnoreCase("ON")) {
       buzzerSilenced = true;
@@ -200,7 +156,7 @@ void handleMessage(char *topic, byte *payload, unsigned int length) {
       queueAck("silence|FAILED|E_TOKEN");
     }
   }
-  // 3. Change the temperature threshold (e.g. control/temp_threshold = 32)
+
   else if (command == "temp_threshold") {
     float newTemperature = 0;
     if (!parseDecimal(text, newTemperature)) {
@@ -212,21 +168,21 @@ void handleMessage(char *topic, byte *payload, unsigned int length) {
       queueAck(String("temp_threshold|OK|") + String(tempThreshold, 1));
     }
   }
-  // 4. Enable/disable telemetry publishing (e.g. control/publish = OFF)
+
   else if (command == "publish") {
     if (text.equalsIgnoreCase("OFF")) {
       isPublishingEnabled = false;
       queueAck("publish|OK");
     } else if (text.equalsIgnoreCase("ON")) {
       isPublishingEnabled = true;
-      // Force a status resend once publishing is enabled again
+
       lastSentStatus = -1;
       queueAck("publish|OK");
     } else {
       queueAck("publish|FAILED|E_TOKEN");
     }
   }
-  // 5. Change the publish interval in seconds (e.g. control/interval = 5)
+
   else if (command == "interval") {
     long newSeconds = 0;
     if (!parseInteger(text, newSeconds)) {
@@ -239,7 +195,7 @@ void handleMessage(char *topic, byte *payload, unsigned int length) {
       queueAck(String("interval|OK|") + String(newSeconds));
     }
   }
-  // 6. Change the no-motion hold in seconds (e.g. control/motion_hold = 15)
+
   else if (command == "motion_hold") {
     long newSeconds = 0;
     if (!parseInteger(text, newSeconds)) {
@@ -252,7 +208,7 @@ void handleMessage(char *topic, byte *payload, unsigned int length) {
       queueAck(String("motion_hold|OK|") + String(newSeconds));
     }
   }
-  // 7. Change the LDR light threshold (e.g. control/light_threshold = 2500)
+
   else if (command == "light_threshold") {
     long newValue = 0;
     if (!parseInteger(text, newValue)) {
@@ -265,7 +221,7 @@ void handleMessage(char *topic, byte *payload, unsigned int length) {
       queueAck(String("light_threshold|OK|") + String(lightThreshold));
     }
   }
-  // 8. Unknown command: report it instead of staying silent
+
   else {
     queueAck(command + "|FAILED|E_UNKNOWN");
   }
@@ -273,9 +229,6 @@ void handleMessage(char *topic, byte *payload, unsigned int length) {
 
 PubSubClient client(mqtt_server, mqtt_port, handleMessage, espClient);
 
-// --- PUBLISH HELPER WITH ERROR HANDLING ---
-// Returns true when the broker accepted the packet. A failure usually means the
-// MQTT buffer is full (topic plus payload too long).
 void logPublishFailure(const char *topic, unsigned int length) {
   Serial.println("Failed to publish to " + String(topic) + " (payload " +
                  String(length) + " bytes)");
@@ -290,7 +243,6 @@ bool publishMessage(const char *topic, const char *payload,
   return true;
 }
 
-// Overload for payloads that must be formatted first (numbers, joined text)
 bool publishMessage(const char *topic, const String &payload,
                     bool retain = false) {
   if (!client.publish(topic, payload.c_str(), retain)) {
@@ -309,8 +261,6 @@ void flushAckQueue() {
   }
 }
 
-// One MQTT connection attempt; loop() calls this again on failure so that the
-// WiFi config portal stays responsive while the broker is unreachable.
 void connectMQTT() {
   if (WiFi.status() != WL_CONNECTED) {
     return;
@@ -319,10 +269,6 @@ void connectMQTT() {
   Serial.print("Connecting to MQTT broker...");
   String clientId = "ESP32-SmartRoom-" + String(random(0xffff), HEX);
 
-  // Last will and testament: the broker announces "offline" (retained) if the
-  // device dies unexpectedly, so the dashboard never shows stale data.
-  // "online" on the availability topic already signals readiness, so no extra
-  // ack is needed here.
   if (client.connect(clientId.c_str(), TOPIC("availability"), 1, true,
                      "offline")) {
     Serial.println("connected!");
@@ -334,7 +280,6 @@ void connectMQTT() {
 
     publishMessage(TOPIC("availability"), "online", true);
 
-    // Force a status resend after reconnecting
     lastSentStatus = -1;
   } else {
     Serial.print("failed, rc=");
@@ -354,30 +299,26 @@ void setup() {
   digitalWrite(LED_PIN, LOW);
 
   dht.begin();
-  // Loads saved credentials and connects STA if configured; otherwise starts
-  // the configuration access point. Always leaves the AP config portal up.
-  // In Wokwi, uncomment the next line to seed its open network on a fresh NVS:
-  // wifiConnect.setDefaultWiFi("Wokwi-GUEST", "");
+
   wifiConnect.begin();
   Serial.println("WiFi status: " + wifiConnect.getStatus());
 
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(handleMessage);
-  // Prefixed topics plus ack messages exceed the default 256-byte buffer
+
   client.setBufferSize(512);
 
   lastMotionMs = millis();
 }
 
 void loop() {
-  // The manager's DNS server only runs when polled, so keep the captive portal
-  // reachable even while WiFi/MQTT are down.
+
   wifiConnect.keepAlive();
 
   unsigned long now = millis();
 
   if (WiFi.status() == WL_CONNECTED) {
-    // Keep MQTT alive; retry at a fixed rate instead of blocking loop().
+
     if (!client.connected() &&
         now - lastMqttAttemptMs >= MQTT_RETRY_INTERVAL_MS) {
       lastMqttAttemptMs = now;
@@ -385,42 +326,34 @@ void loop() {
     }
     if (client.connected()) {
       client.loop();
-      // Send queued command confirmations outside the callback
+
       flushAckQueue();
     }
   } else if (wifiConnect.isConfigured() &&
              now - lastWifiRetryMs >= WIFI_RETRY_INTERVAL_MS) {
-    // The manager retries only during begin(); retry a configured STA that
-    // drops later. While unconfigured, the config portal is the only path.
+
     lastWifiRetryMs = now;
     WiFi.reconnect();
   }
 
-  // --- 1. READ ALL THREE SENSORS ---
   float temperature = dht.readTemperature();
   float humidity = dht.readHumidity();
   int lightLevel = analogRead(LDR_PIN);
   int motion = digitalRead(PIR_PIN);
 
-  // Validate the DHT11 readings
   if (isnan(temperature) || isnan(humidity)) {
     Serial.println("Failed to read DHT11 sensor!");
     delay(500);
     return;
   }
 
-  // Record the last time motion was detected
   if (motion == HIGH) {
     lastMotionMs = now;
   }
 
-  // Note: on common LDR modules an ADC reading below lightThreshold means the
-  // room is bright. If the simulator's brightness slider produces a high value
-  // (> 2000), invert the comparison below.
   bool roomIsBright = (lightLevel < lightThreshold);
   bool someonePresent = (now - lastMotionMs < noMotionHoldMs);
 
-  // --- 2. SENSOR FUSION ---
   if (temperature > tempThreshold && motion == HIGH) {
     roomStatus = STATUS_HOT;
   } else if (roomIsBright && !someonePresent) {
@@ -429,7 +362,6 @@ void loop() {
     roomStatus = STATUS_NORMAL;
   }
 
-  // --- 3. ACTUATORS FOLLOW THE STATUS (LED & buzzer driven in one place) ---
   switch (roomStatus) {
   case STATUS_HOT:
   case STATUS_ENERGY_WASTE:
@@ -440,17 +372,11 @@ void loop() {
   default:
     digitalWrite(LED_PIN, LOW);
     digitalWrite(BUZZER_PIN, LOW);
-    // End the transient silence with the current alarm. The persistent mute is
-    // intentionally kept: only the dashboard can turn it back on.
+
     buzzerSilenced = false;
     break;
   }
 
-  // --- 4. PUBLISH STATUS ON CHANGE ---
-  // Only the status code is sent; the alert topic was removed because its
-  // content could always be derived from the status. The dashboard maps code ->
-  // text, so wording stays editable there. retained=true so a dashboard that
-  // connects later immediately receives the current condition.
   if (client.connected() && isPublishingEnabled &&
       (int)roomStatus != lastSentStatus) {
     if (publishMessage(TOPIC("status"), statusCode(roomStatus), true)) {
@@ -458,7 +384,6 @@ void loop() {
     }
   }
 
-  // --- 5. PUBLISH SENSOR DATA TO THE MQTT BROKER ON INTERVAL ---
   if (client.connected() && isPublishingEnabled &&
       (now - lastPublishMs >= publishIntervalMs)) {
     lastPublishMs = now;
@@ -468,7 +393,6 @@ void loop() {
     publishMessage(TOPIC("light"), String(lightLevel), true);
     publishMessage(TOPIC("motion"), someonePresent ? "ON" : "OFF", true);
 
-    // Also show it on the Serial Monitor for simulation monitoring
     Serial.println("--- Data published to MQTT ---");
     Serial.printf("Temp: %.1f C | Humidity: %.1f %% | LDR: %d | PIR: %d\n",
                   temperature, humidity, lightLevel, motion);

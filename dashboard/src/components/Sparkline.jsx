@@ -101,7 +101,7 @@ export default function Sparkline(props) {
   };
 
   createEffect(() => {
-    // Touch the reactive array so a new sample triggers a redraw.
+
     props.values.length;
     draw();
   });

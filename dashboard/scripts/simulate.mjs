@@ -1,15 +1,4 @@
 #!/usr/bin/env node
-/*
- * Simulates the ComfortRoom firmware against the local mosquitto broker.
- * No ESP32 required.
- *
- *   cd dashboard && npm run simulate
- *
- * Optional environment variables:
- *   MQTT_URL=mqtt://127.0.0.1:1883
- *   DEVICE_ID=comfortroom-...
- *   INTERVAL_MS=3000
- */
 
 import mqtt from "mqtt";
 
@@ -91,8 +80,6 @@ async function loop() {
 
     const now = Date.now();
 
-    // 48 ticks: occupied for 30, empty for 18. Lights stay on for most of the
-    // empty period so ENERGY_WASTE occurs, then dim so the room returns NORMAL.
     const cycle = tick % 48;
     const rawMotion = cycle < 30;
     if (rawMotion) lastMotionAt = now;

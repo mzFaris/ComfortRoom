@@ -47,7 +47,7 @@ function loadSettings() {
       settings.deviceId = saved.deviceId.trim();
     }
   } catch {
-    /* localStorage can be unavailable; defaults still work */
+
   }
   return settings;
 }
@@ -56,7 +56,7 @@ function saveSettings(brokerUrl, deviceId) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ brokerUrl, deviceId }));
   } catch {
-    /* ignore */
+
   }
 }
 
@@ -177,7 +177,7 @@ export default function App() {
       try {
         active.end(true);
       } catch {
-        /* closing twice is harmless */
+
       }
     }
     setState({
@@ -541,7 +541,7 @@ export default function App() {
       try {
         client.end(true);
       } catch {
-        /* ignore */
+
       }
     };
 
@@ -568,7 +568,7 @@ export default function App() {
         try {
           client.end(true);
         } catch {
-          /* ignore */
+
         }
       }
     });

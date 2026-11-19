@@ -5,9 +5,6 @@ export const STALE_AFTER_S = 20;
 
 export const DEFAULT_DEVICE_ID = "comfortroom-8f2c41d6-9a3b-4e57-b0d2-6c5a7e19f408";
 
-// Browsers need MQTT over WebSockets; mosquitto exposes that on port 9001.
-// Deriving the host from the page keeps the default working on localhost and
-// when the dashboard is opened from another device on the LAN.
 export function defaultBrokerUrl() {
   const host = typeof window !== "undefined" && window.location.hostname
     ? window.location.hostname
