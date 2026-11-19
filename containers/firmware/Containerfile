@@ -18,21 +18,15 @@ RUN apt-get update \
 RUN curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh \
       | BINDIR=/usr/local/bin sh -s "${ARDUINO_CLI_VERSION}"
 
-# ESP32 core from the Espressif board-manager index. The downloads are large
-# (hundreds of MB) and the default 60 s inactivity timeout is easy to trip, so
-# raise it and retry; completed archives are kept in downloads/ between tries.
-RUN mkdir -p /arduino \
+# arduino-cli configuration. The ESP32 core itself is not baked in: it lives in
+# the comfortroom-arduino-core Podman volume and is installed on first compile
+# (see scripts/firmware.sh), which keeps this image small and makes image
+# rebuilds cheap.
+RUN mkdir -p /arduino/data \
  && arduino-cli config init --overwrite \
  && arduino-cli config set board_manager.additional_urls \
       https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json \
- && arduino-cli config set network.connection_timeout 10m \
- && arduino-cli core update-index \
- && for attempt in 1 2 3; do \
-      arduino-cli core download esp32:esp32 && break; \
-      [ "$attempt" -eq 3 ] && exit 1; \
-      sleep 10; \
-    done \
- && arduino-cli core install esp32:esp32
+ && arduino-cli config set network.connection_timeout 10m
 
 RUN arduino-cli lib install \
       "DHT sensor library" \

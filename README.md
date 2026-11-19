@@ -18,15 +18,18 @@ Everything runs through Podman. Only `podman` is required on the host; Node,
 
 ## Quick start
 
-Firmware — the first run builds the toolchain image (ESP32 core + libraries), so
-it takes a while and downloads about 2 GB; the resulting image is roughly 10 GB
-because it carries the ESP32 toolchains for every target.
+Firmware — the toolchain image is small (~345 MB) and builds quickly. The first
+compile installs the pinned ESP32 core into the `comfortroom-arduino-core`
+Podman volume (~1.5 GB download, ~7 GB on disk); later runs reuse it.
 
 ```bash
 scripts/firmware.sh compile
 scripts/firmware.sh upload     # /dev/ttyUSB0; override with TTY_DEV=...
 scripts/firmware.sh monitor
 ```
+
+Change the core pin with `CORE_VERSION=4.0.0 scripts/firmware.sh compile`, or
+drop the volume with `scripts/firmware.sh core-reset`.
 
 Dashboard:
 
