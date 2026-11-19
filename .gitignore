@@ -1,5 +1,10 @@
 .direnv
 .envrc
+.env
+.env.*
+*.pem
+*.key
+secrets/
 node_modules/
 dist/
 result

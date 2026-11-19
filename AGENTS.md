@@ -18,7 +18,7 @@ Two projects, each with its own flake: the ESP32 firmware in `firmware/ComfortRo
 - Dev server (port 8080): `cd dashboard && npm install && npm run dev`. Do not open `index.html` from `file://`; MQTT over WebSockets needs an HTTP origin.
 - Production build: `cd dashboard && npm run build` (static site in `dashboard/dist/`). The dashboard flake also builds it: `nix build ./dashboard#dashboard` (or `cd dashboard && nix build`), then serve the resulting `result/` (e.g. `python3 -m http.server 8080 --directory result`).
 - After changing JS dependencies, run `npm install` to update `dashboard/package-lock.json` and refresh `npmDepsHash` in `dashboard/flake.nix` with `nix run nixpkgs#prefetch-npm-deps -- dashboard/package-lock.json`.
-- MQTT runs on the local `mosquitto.service`: firmware on `<host>:1883` (plain TCP), browsers on `ws://<page-host>:9001/mqtt` (WebSockets). The dashboard derives the host from the page origin; the firmware uses the LAN IP in `mqtt_server`. Both listeners must bind `0.0.0.0` and be allowed through the firewall; on this host they live in `/home/fr/nixos/configuration.nix` (`sudo nixos-rebuild switch --flake /etc/nixos#uzi`). The NixOS mosquitto module always loads an ACL plugin, and an empty ACL denies all traffic, so each listener also needs `acl = [ "topic readwrite #" ]`.
+- MQTT runs on the local `mosquitto.service`: firmware on `<host>:1883` (plain TCP), browsers on `ws://<page-host>:9001/mqtt` (WebSockets). The dashboard derives the host from the page origin; the firmware uses the LAN IP in `mqtt_server`. Both listeners must bind `0.0.0.0` and be allowed through the firewall; on NixOS they live in the host's `configuration.nix` (`sudo nixos-rebuild switch --flake /etc/nixos#<host>`). The NixOS mosquitto module always loads an ACL plugin, and an empty ACL denies all traffic, so each listener also needs `acl = [ "topic readwrite #" ]`.
 - `cd dashboard && npm run simulate` publishes synthetic retained telemetry (`NORMAL` → `HOT` → `ENERGY_WASTE`) to the local broker without an ESP32. Override with `MQTT_URL`, `DEVICE_ID`, `INTERVAL_MS`, `MOTION_HOLD_MS`; `Ctrl+C` publishes availability `offline`.
 - `dashboard/src/constants.js` hardcodes the default device ID (`DEFAULT_DEVICE_ID`). Changing `DEVICE_ID` in the sketch requires changing that default too; per-browser broker/device overrides persist in `localStorage`.
 - The dashboard owns all human-readable wording. Add status, error, and command mappings in `dashboard/src/constants.js` and use them in the components in the same release as the firmware change.
@@ -64,7 +64,7 @@ Subscribes to `<id>/room/control/#`:
 
 The dashboard maps every code — status and error — to the wording it wants. Numeric payloads carry no unit; `°C` and friends are added by the dashboard. Adding a status or error code means adding it to the dashboard mapping in the same release.
 
-Manual check: `mosquitto_sub -h 192.168.1.16 -v -t '<id>/room/#'` while publishing to a `control/...` topic with `mosquitto_pub`.
+Manual check: `mosquitto_sub -h <broker-ip> -v -t '<id>/room/#'` while publishing to a `control/...` topic with `mosquitto_pub`.
 
 Do not rename topics or payload values without updating the dashboard.
 

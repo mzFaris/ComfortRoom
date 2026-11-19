@@ -109,8 +109,8 @@ protocol websockets
 allow_anonymous true
 ```
 
-On this NixOS host these are configured in `/home/fr/nixos/configuration.nix`;
-apply changes with `sudo nixos-rebuild switch --flake /etc/nixos#uzi`.
+On NixOS these are configured in the host's `configuration.nix`;
+apply changes with `sudo nixos-rebuild switch --flake /etc/nixos#<host>`.
 The NixOS module also loads an ACL plugin, so each listener needs
 `acl = [ "topic readwrite #" ]`; an empty ACL denies all traffic.
 

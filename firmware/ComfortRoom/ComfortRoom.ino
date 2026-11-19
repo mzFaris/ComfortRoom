@@ -17,7 +17,8 @@ DHT dht(DHT_PIN, DHT_TYPE);
 
 #define TOPIC(path) (TOPIC_PREFIX path)
 
-const char *mqtt_server = "192.168.1.16";
+// Set this to the LAN IP of the machine running the MQTT broker.
+const char *mqtt_server = "192.168.1.100";
 const int mqtt_port = 1883;
 
 WiFiClient espClient;
