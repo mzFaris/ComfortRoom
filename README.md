@@ -30,6 +30,9 @@ npm run dev        # http://localhost:8080
 No ESP32 at hand? `cd dashboard && npm run simulate` publishes synthetic
 telemetry to a local broker.
 
+Both the firmware and the dashboard need an MQTT broker on the host (see
+[MQTT](#mqtt)); nothing in this repo provides one.
+
 ## MQTT
 
 Every topic is namespaced by device ID (`comfortroom-<uuid>`):
@@ -40,10 +43,11 @@ Every topic is namespaced by device ID (`comfortroom-<uuid>`):
 Payloads are machine-readable codes, not prose; the dashboard owns all
 human-readable wording. The exact contract is in [`AGENTS.md`](AGENTS.md).
 
-Point `mqtt_server` in the sketch at the machine running your broker, and make
-sure that broker exposes plain MQTT on `1883` for the device and MQTT over
-WebSockets on `9001` for browsers. The example configuration uses an
-unauthenticated broker on a trusted LAN — use a unique device UUID per unit.
+Point `mqtt_server` in the sketch at the machine running your broker. The broker
+is a prerequisite, not part of this repo: any broker that exposes plain MQTT on
+`1883` for the device and MQTT over WebSockets on `9001` for browsers, both
+bound to `0.0.0.0`, will do. The setup assumes an unauthenticated broker on a
+trusted LAN — use a unique device UUID per unit.
 
 ## More
 

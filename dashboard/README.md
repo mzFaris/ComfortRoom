@@ -90,7 +90,8 @@ npm run simulate
 
 ## Connect
 
-The defaults match the local `mosquitto.service`:
+The defaults assume a broker provided by the host (see
+[AGENTS.md](../AGENTS.md)); nothing in this repo runs one:
 
 | Setting | Default |
 |---|---|
@@ -98,7 +99,7 @@ The defaults match the local `mosquitto.service`:
 | Device ID | the `DEVICE_ID` in `firmware/ComfortRoom/ComfortRoom.ino` |
 
 The firmware uses plain MQTT on port 1883; browsers use MQTT over WebSockets on
-port 9001. Mosquitto needs both listeners, for example:
+port 9001, so the broker needs both listeners, for example:
 
 ```conf
 listener 1883 0.0.0.0
@@ -109,10 +110,10 @@ protocol websockets
 allow_anonymous true
 ```
 
-On NixOS these are configured in the host's `configuration.nix`;
-apply changes with `sudo nixos-rebuild switch --flake /etc/nixos#<host>`.
-The NixOS module also loads an ACL plugin, so each listener needs
-`acl = [ "topic readwrite #" ]`; an empty ACL denies all traffic.
+Configure those listeners wherever the broker runs; this repo does not manage
+it. The NixOS `services.mosquitto` module additionally loads an ACL plugin, so
+each listener needs `acl = [ "topic readwrite #" ]`; an empty ACL denies all
+traffic.
 
 The page connects automatically. Use **Settings** to change the broker or device
 ID; both are remembered in `localStorage`.
@@ -163,7 +164,7 @@ Things worth knowing:
 
 ## Caveats
 
-- The local mosquitto broker is unauthenticated and exposed on ports 1883/9001.
+- The broker is unauthenticated and exposed on ports 1883/9001.
   Anyone on the LAN who knows the device ID can read the room and send commands.
   Keep it on a trusted network and use a unique device UUID per unit.
 - Retained values keep showing the last known readings while the device is
