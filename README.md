@@ -12,9 +12,11 @@ dashboard/              SolidJS + Vite dashboard
 
 ## Quick start
 
-Firmware (needs `arduino-cli`; see `AGENTS.md` for the one-time library setup):
+Firmware (`arduino-cli` ships in the `firmware` flake, so no global install is
+needed; see `AGENTS.md` for the one-time core/library setup):
 
 ```bash
+nix develop ./firmware
 arduino-cli compile --fqbn esp32:esp32:esp32 firmware/ComfortRoom
 arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32 firmware/ComfortRoom
 ```

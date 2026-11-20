@@ -6,8 +6,8 @@ Two projects, each with its own flake: the ESP32 firmware in `firmware/ComfortRo
 
 - One-time setup: `arduino-cli core install esp32:esp32`, then `arduino-cli lib install "DHT sensor library" PubSubClient "Adafruit Unified Sensor" ESP32_WiFi_Connect`. Without the sensor/MQTT libraries the compile fails with `fatal error: DHT.h: No such file or directory`. `firmware/flake.nix` provides `arduino-cli` and `mosquitto`, so `nix develop ./firmware -c arduino-cli ...` works without a global install.
 - `ESP32_WiFi_Connect` also needs ESPAsyncWebServer + AsyncTCP, but the Arduino index versions (ESPAsyncWebServer 3.1.0, AsyncTCP 1.1.4) fail on ESP32 core 3.x with `mbedtls_md5_*_ret` errors. Use the maintained ESP32Async forks instead: `arduino-cli lib uninstall ESPAsyncWebServer AsyncTCP ESPAsyncTCP`, then `git clone --depth 1 https://github.com/ESP32Async/AsyncTCP.git ~/Arduino/libraries/AsyncTCP` and `git clone --depth 1 https://github.com/ESP32Async/ESPAsyncWebServer.git ~/Arduino/libraries/ESPAsyncWebServer`. Verified with AsyncTCP 3.6.1 and ESPAsyncWebServer 3.13.0 in the default user libraries directory.
-- Compile (verified, from the repo root): `arduino-cli compile --fqbn esp32:esp32:esp32 firmware/ComfortRoom` — generic ESP32 Dev Module; change the FQBN if the board changes.
-- Upload: `arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32 firmware/ComfortRoom`
+- Compile (verified, from the repo root inside `nix develop ./firmware`): `arduino-cli compile --fqbn esp32:esp32:esp32 firmware/ComfortRoom` — generic ESP32 Dev Module; change the FQBN if the board changes.
+- Upload (same shell): `arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32 firmware/ComfortRoom`
 - Serial Monitor: 115200 baud.
 - The sketch path is `firmware/ComfortRoom/ComfortRoom.ino`; Arduino requires the folder name (`ComfortRoom`) to match the `.ino`, so do not flatten it to `firmware/ComfortRoom.ino`.
 

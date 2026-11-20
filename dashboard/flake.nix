@@ -3,7 +3,8 @@
 
   inputs.nixpkgs.url = "https://channels.nixos.org/nixos-unstable/nixexprs.tar.zst";
 
-  outputs = { self, nixpkgs }:
+  outputs =
+    { self, nixpkgs }:
     let
       systems = [
         "x86_64-linux"
@@ -12,22 +13,27 @@
         "aarch64-darwin"
       ];
 
-      forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f {
-        inherit system;
-        pkgs = nixpkgs.legacyPackages.${system};
-      });
+      forAllSystems =
+        f:
+        nixpkgs.lib.genAttrs systems (
+          system:
+          f {
+            inherit system;
+            pkgs = nixpkgs.legacyPackages.${system};
+          }
+        );
     in
     {
-      devShells = forAllSystems ({ pkgs, ... }: {
-        default = pkgs.mkShell {
-          packages = [ pkgs.nodejs_22 ];
-          shellHook = ''
-            echo "ComfortRoom dashboard: npm install && npm run dev"
-          '';
-        };
-      });
+      devShells = forAllSystems (
+        { pkgs, ... }: {
+          default = pkgs.mkShell {
+            packages = [ pkgs.nodejs_22 ];
+          };
+        }
+      );
 
-      packages = forAllSystems ({ pkgs, ... }:
+      packages = forAllSystems (
+        { pkgs, ... }:
         let
           dashboard = pkgs.buildNpmPackage {
             pname = "comfortroom-dashboard";
@@ -35,11 +41,16 @@
             nodejs = pkgs.nodejs_22;
             src = pkgs.lib.cleanSourceWith {
               src = ./.;
-              filter = path: type:
-                let base = baseNameOf (toString path);
-                in base != "node_modules" && base != "dist"
-                  && base != "result" && base != "flake.nix"
-                  && base != "flake.lock";
+              filter =
+                path: type:
+                let
+                  base = baseNameOf (toString path);
+                in
+                base != "node_modules"
+                && base != "dist"
+                && base != "result"
+                && base != "flake.nix"
+                && base != "flake.lock";
             };
             npmDepsHash = "sha256-PORqVNKB70QAx1zutz02GSmSGPjiwz+Pgkx+hJhpzBA=";
             installPhase = ''
@@ -53,6 +64,7 @@
         {
           inherit dashboard;
           default = dashboard;
-        });
+        }
+      );
     };
 }
