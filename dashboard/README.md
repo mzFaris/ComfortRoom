@@ -90,30 +90,15 @@ npm run simulate
 
 ## Connect
 
-The defaults assume a broker provided by the host (see
-[AGENTS.md](../AGENTS.md)); nothing in this repo runs one:
+The defaults assume a broker provided by the host; see
+[the broker setup in the top-level README](../README.md#mqtt-broker-host-prerequisite).
+The firmware uses plain MQTT on port 1883; browsers use MQTT over WebSockets on
+port 9001.
 
 | Setting | Default |
 |---|---|
 | Broker | `ws://<page-host>:9001/mqtt` |
 | Device ID | the `DEVICE_ID` in `firmware/ComfortRoom/ComfortRoom.ino` |
-
-The firmware uses plain MQTT on port 1883; browsers use MQTT over WebSockets on
-port 9001, so the broker needs both listeners, for example:
-
-```conf
-listener 1883 0.0.0.0
-allow_anonymous true
-
-listener 9001 0.0.0.0
-protocol websockets
-allow_anonymous true
-```
-
-Configure those listeners wherever the broker runs; this repo does not manage
-it. The NixOS `services.mosquitto` module additionally loads an ACL plugin, so
-each listener needs `acl = [ "topic readwrite #" ]`; an empty ACL denies all
-traffic.
 
 The page connects automatically. Use **Settings** to change the broker or device
 ID; both are remembered in `localStorage`.
