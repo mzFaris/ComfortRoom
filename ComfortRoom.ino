@@ -362,9 +362,16 @@ void loop() {
     if (now - lastPublishMs >= publishIntervalMs) {
       lastPublishMs = now;
 
-      client.publish(TOPIC("temperature"), String(temperature, 1).c_str(), true);
-      client.publish(TOPIC("humidity"), String(humidity, 1).c_str(), true);
-      client.publish(TOPIC("light"), String(lightLevel).c_str(), true);
+      char value[16];
+
+      snprintf(value, sizeof(value), "%.1f", temperature);
+      client.publish(TOPIC("temperature"), value, true);
+
+      snprintf(value, sizeof(value), "%.1f", humidity);
+      client.publish(TOPIC("humidity"), value, true);
+
+      snprintf(value, sizeof(value), "%d", lightLevel);
+      client.publish(TOPIC("light"), value, true);
       client.publish(TOPIC("motion"), someonePresent ? "ON" : "OFF", true);
 
       Serial.println("--- Data published to MQTT ---");
