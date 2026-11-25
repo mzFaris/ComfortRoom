@@ -11,12 +11,11 @@
 #define DHT_TYPE DHT11
 DHT dht(DHT_PIN, DHT_TYPE);
 
-#define DEVICE_ID "comfortroom-8f2c41d6-9a3b-4e57-b0d2-6c5a7e19f408"
+#define DEVICE_ID "comfort"
 #define TOPIC_PREFIX DEVICE_ID "/room/"
 
 #define TOPIC(path) (TOPIC_PREFIX path)
 
-// Set this to the LAN IP of the machine running the MQTT broker.
 const char *mqtt_server = "192.168.1.100";
 const int mqtt_port = 1883;
 
