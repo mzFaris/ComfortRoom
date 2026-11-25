@@ -1,5 +1,6 @@
 #include <DHT.h>
 #include <ESP32_WiFi_Connect.h>
+#include <Preferences.h>
 #include <PubSubClient.h>
 #include <WiFi.h>
 
@@ -16,8 +17,28 @@ DHT dht(DHT_PIN, DHT_TYPE);
 
 #define TOPIC(path) (TOPIC_PREFIX path)
 
-const char *mqtt_server = "192.168.1.100";
+// Broker host is runtime-configurable: `control/broker <host>` stores it in NVS
+// and reconnects. MQTT_SERVER is only the first-boot fallback, supplied at build
+// time without quotes, e.g.:
+//   --build-property compiler.cpp.extra_flags=-DMQTT_SERVER=192.168.1.100
+#ifndef MQTT_SERVER
+#error "MQTT_SERVER is not defined; pass -DMQTT_SERVER=<host> via compiler.cpp.extra_flags"
+#endif
+
+#define STRINGIFY_IMPL(value) #value
+#define STRINGIFY(value) STRINGIFY_IMPL(value)
+
+constexpr const char *BROKER_NAMESPACE = "comfort";
+constexpr const char *BROKER_KEY = "mqtt_server";
+constexpr size_t MQTT_SERVER_MAX = 64;
+
 const int mqtt_port = 1883;
+
+char mqttServer[MQTT_SERVER_MAX] = STRINGIFY(MQTT_SERVER);
+bool brokerChangePending = false;
+String pendingBrokerHost;
+
+Preferences brokerPrefs;
 
 WiFiClient espClient;
 ESP32_WiFi_Connect wifiConnect;
@@ -111,6 +132,39 @@ bool parseDecimal(const String &text, float &value) {
   char *end = nullptr;
   value = strtof(text.c_str(), &end);
   return end != nullptr && *end == '\0';
+}
+
+bool isValidBrokerHost(const String &host) {
+  if (host.length() == 0) {
+    return false;
+  }
+  for (size_t i = 0; i < host.length(); i++) {
+    char c = host[i];
+    if (!isalnum((unsigned char)c) && c != '.' && c != '-' && c != '_') {
+      return false;
+    }
+  }
+  return true;
+}
+
+void loadBrokerHost() {
+  brokerPrefs.begin(BROKER_NAMESPACE, true);
+  String stored = brokerPrefs.getString(BROKER_KEY, "");
+  brokerPrefs.end();
+
+  if (stored.length() > 0) {
+    snprintf(mqttServer, sizeof(mqttServer), "%s", stored.c_str());
+    Serial.println("MQTT broker from NVS: " + String(mqttServer));
+  } else {
+    Serial.println("MQTT broker from build default: " + String(mqttServer));
+  }
+}
+
+bool saveBrokerHost(const String &host) {
+  brokerPrefs.begin(BROKER_NAMESPACE, false);
+  size_t written = brokerPrefs.putString(BROKER_KEY, host);
+  brokerPrefs.end();
+  return written == host.length();
 }
 
 void handleMessage(char *topic, byte *payload, unsigned int length) {
@@ -223,12 +277,30 @@ void handleMessage(char *topic, byte *payload, unsigned int length) {
     }
   }
 
+  else if (command == "broker") {
+    if (text.length() >= MQTT_SERVER_MAX) {
+      queueAck("broker|FAILED|E_RANGE");
+    } else if (!isValidBrokerHost(text)) {
+      queueAck("broker|FAILED|E_TOKEN");
+    } else if (text == String(mqttServer)) {
+      queueAck(String("broker|OK|") + text);
+    } else if (!saveBrokerHost(text)) {
+      Serial.println("Failed to save broker host to NVS");
+      queueAck("broker|FAILED|E_NVS");
+    } else {
+      pendingBrokerHost = text;
+      Serial.println("Broker host changed to " + text + ", reconnecting");
+      queueAck(String("broker|OK|") + text);
+      brokerChangePending = true;
+    }
+  }
+
   else {
     queueAck(command + "|FAILED|E_UNKNOWN");
   }
 }
 
-PubSubClient client(mqtt_server, mqtt_port, handleMessage, espClient);
+PubSubClient client(espClient);
 
 void logPublishFailure(const char *topic, unsigned int length) {
   Serial.println("Failed to publish to " + String(topic) + " (payload " +
@@ -282,7 +354,8 @@ void setup() {
   wifiConnect.begin();
   Serial.println("WiFi status: " + wifiConnect.getStatus());
 
-  client.setServer(mqtt_server, mqtt_port);
+  loadBrokerHost();
+  client.setServer(mqttServer, mqtt_port);
   client.setCallback(handleMessage);
 
   client.setBufferSize(512);
@@ -297,6 +370,18 @@ void loop() {
   unsigned long now = millis();
 
   if (WiFi.status() == WL_CONNECTED) {
+
+    // Ack the change to the old broker first, then switch before the next
+    // connect attempt. If the connection already dropped, the ack is lost.
+    if (brokerChangePending && (!client.connected() || ackQueueCount == 0)) {
+      brokerChangePending = false;
+      snprintf(mqttServer, sizeof(mqttServer), "%s", pendingBrokerHost.c_str());
+      pendingBrokerHost = "";
+      client.disconnect();
+      client.setServer(mqttServer, mqtt_port);
+      lastMqttAttemptMs = millis() - MQTT_RETRY_INTERVAL_MS;
+      lastSentStatus = -1;
+    }
 
     if (!client.connected() &&
         now - lastMqttAttemptMs >= MQTT_RETRY_INTERVAL_MS) {
