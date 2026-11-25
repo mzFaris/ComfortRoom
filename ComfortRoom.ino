@@ -241,7 +241,7 @@ void flushAckQueue() {
     String message = ackQueue[ackQueueTail];
     ackQueueTail = (ackQueueTail + 1) % ACK_QUEUE_SIZE;
     ackQueueCount--;
-    client.publish(TOPIC("ack"), message);
+    client.publish(TOPIC("ack"), message.c_str());
   }
 }
 
@@ -353,7 +353,7 @@ void loop() {
     break;
   }
 
-  if (client.connected() && isPublishingEnabled &&) {
+  if (client.connected() && isPublishingEnabled) {
     if ((int)roomStatus != lastSentStatus &&
         client.publish(TOPIC("status"), statusCode(roomStatus), true)) {
       lastSentStatus = (int)roomStatus;
@@ -362,9 +362,9 @@ void loop() {
     if (now - lastPublishMs >= publishIntervalMs) {
       lastPublishMs = now;
 
-      client.publish(TOPIC("temperature"), String(temperature, 1), true);
-      client.publish(TOPIC("humidity"), String(humidity, 1), true);
-      client.publish(TOPIC("light"), String(lightLevel), true);
+      client.publish(TOPIC("temperature"), String(temperature, 1).c_str(), true);
+      client.publish(TOPIC("humidity"), String(humidity, 1).c_str(), true);
+      client.publish(TOPIC("light"), String(lightLevel).c_str(), true);
       client.publish(TOPIC("motion"), someonePresent ? "ON" : "OFF", true);
 
       Serial.println("--- Data published to MQTT ---");
