@@ -1,49 +1,46 @@
 # ComfortRoom
 
-Single-file ESP32/Arduino firmware for a room-comfort monitor (DHT11 temperature/humidity, LDR, PIR, buzzer) that reports over MQTT.
+Single-file ESP32/Arduino firmware (`ComfortRoom.ino`): DHT11 temperature/humidity, LDR, PIR, and buzzer, reporting over MQTT.
 
 ## Build and verify
 
-- Arduino CLI only (no PlatformIO, tests, lint config, or CI). Compiling is the only verification step.
-- One-time setup:
+- No tests, lint config, or CI. Compiling is the only verification step.
+- One-time setup. `ESP32_WiFi_Connect` includes `AsyncTCP.h`/`ESPAsyncWebServer.h`, so both are required even though the sketch doesn't use them directly:
   ```sh
   arduino-cli core install esp32:esp32
-  arduino-cli lib install "DHT sensor library" "ESP32_WiFi_Connect" "PubSubClient" "ESPAsyncWebServer" "AsyncTCP"
+  arduino-cli lib install "DHT sensor library" "ESP32_WiFi_Connect" "PubSubClient" \
+    "ESP Async WebServer" "Async TCP"
   ```
-- Compile from the repo root (the sketch directory name must match `ComfortRoom.ino`). `MQTT_SERVER` is the mandatory first-boot broker fallback and must be passed unquoted:
+- Install the `ESP32Async` forks named `"ESP Async WebServer"` and `"Async TCP"`, not the similarly named `"ESPAsyncWebServer"`/`"AsyncTCP"` packages: the latter (3.1.0/1.1.4) fail on esp32 core 3.x with `mbedtls_md5_*_ret` errors. If those old packages are already installed, uninstall them first (`arduino-cli lib uninstall "ESPAsyncWebServer" "AsyncTCP"`).
+- Verified with esp32 core 3.3.12, ESP Async WebServer 3.12.1, Async TCP 3.6.1; the sketch already uses ~78% of the default 1.3 MB flash partition, so watch size when adding libraries.
+- Compile from the repo root (the directory name must match `ComfortRoom.ino`):
   ```sh
-  arduino-cli compile --fqbn esp32:esp32:esp32 --build-path build \
-    --build-property compiler.cpp.extra_flags=-DMQTT_SERVER=192.168.1.100 .
+  arduino-cli compile --fqbn esp32:esp32:esp32 --build-path build .
   ```
-- Don't override `build.extra_flags` for this: it replaces the platform's defaults (dropping `-DESP32`) and library compilation breaks.
-- `build/` is generated and gitignored; never edit or commit it. Delete it for a clean rebuild.
+- The broker host is hardcoded via `MQTT_SERVER` near the top of `ComfortRoom.ino` (default `192.168.1.100`); edit that literal instead of passing build flags. A runtime `control/broker` change persists in NVS and overrides it.
+- `build/` is generated and gitignored; never edit it, and delete it for a clean rebuild.
 
-## Configuration
+## Runtime configuration
 
-- MQTT broker host is runtime-configurable: publish `control/broker <host>` (see contract). It is persisted in NVS (namespace `comfort`, key `mqtt_server`) and the device reconnects after queued acks flush.
-- The sketch holds no broker IP. `-DMQTT_SERVER=<host>` supplies the first-boot fallback only; since it is a bare token, hostnames with letters/hyphens/dots work, but it must not be quoted on the command line.
-- `mqtt_port` is still hardcoded at `1883`.
-- WiFi credentials are managed by the `ESP32_WiFi_Connect` library and are not stored here; don't add them to the sketch.
+- The hardcoded broker host is the first-boot fallback. A runtime `control/broker <host>` change is persisted in NVS (namespace `comfort`, key `mqtt_server`) and overrides it; the device acks on the old broker, then reconnects. `mqtt_port` is hardcoded to `1883`.
+- Only the broker host persists. Thresholds, intervals, publish state, and buzzer mute/silence all reset to defaults on reboot.
+- WiFi credentials are managed by `ESP32_WiFi_Connect`, not this sketch; don't add them here.
 - Pins: PIR `14`, DHT11 `27`, LDR `34`, buzzer `26`.
-- All topics derive from `DEVICE_ID` via `TOPIC()`: `comfortroom-<uuid>/room/...`. Changing the ID or `room/` prefix breaks every external consumer.
 
-## MQTT contract
+## MQTT interface (treat as public contract)
 
-- Publishes retained topics: `status` (`NORMAL|HOT|ENERGY_WASTE`, only when it changes), `temperature`, `humidity`, `light` (raw ADC 0–4095), `motion` (`ON|OFF`), and `availability` (`online`, with LWT `offline`).
-- Subscribes to `control/#`; the topic suffix selects the command:
-  - `buzzer ON|OFF`, `silence ON|OFF`, `publish ON|OFF`
-  - `temp_threshold` 0.1–100, `interval` 1–3600 seconds, `motion_hold` 1–3600 seconds, `light_threshold` 0–4095
-  - `broker` a hostname or IP using only `[A-Za-z0-9._-]`, max 63 chars; saved to NVS and reconnected
-- Replies go to `ack` as `command|OK[|value]` or `command|FAILED|E_NUMBER|E_RANGE|E_TOKEN|E_TOPIC|E_NVS|E_UNKNOWN`. Acks queue (max 4) and flush after `client.loop()`.
-- Treat topic names and payload formats as a public interface; don't change them without updating consumers.
+- All topics derive from `DEVICE_ID` via `TOPIC()`: currently `comfortroom/room/...`. Changing `DEVICE_ID` or the `room/` prefix breaks external consumers.
+- Publishes retained `status` (`NORMAL|HOT|ENERGY_WASTE`, only when it changes), `temperature`, `humidity`, `light` (raw ADC 0–4095), `motion` (`ON|OFF`), and `availability` (`online`, LWT `offline`).
+- Subscribes to `control/#`; the topic suffix selects the command: `buzzer`, `silence`, `publish` (`ON|OFF`); `temp_threshold` (0, 100]; `interval` and `motion_hold` 1–3600 seconds; `light_threshold` 0–4095; `broker` host.
+- Acks go to `ack` as `command|OK[|value]` or `command|FAILED|E_NUMBER|E_RANGE|E_TOKEN|E_TOPIC|E_NVS|E_UNKNOWN`. The queue holds 4 and flushes after `client.loop()`.
+- `clientId` is hardcoded to `ESP32` and `DEVICE_ID` to `comfortroom`, so two devices on one broker will disconnect each other and share topics.
 
-## Logic gotchas
+## Logic and toolchain gotchas
 
-- The LDR is treated as active-low: `roomIsBright = lightLevel < lightThreshold`. Lower ADC means brighter; don't invert this without checking the wiring.
-- `HOT` (temperature above threshold) takes precedence over `ENERGY_WASTE` (bright with no motion for `noMotionHoldMs`).
+- The LDR is treated as active-low: `roomIsBright = lightLevel < lightThreshold` (lower ADC means brighter). Don't invert without checking the wiring.
+- `HOT` takes precedence over `ENERGY_WASTE` (bright with no motion for `noMotionHoldMs`).
 - `silence` clears automatically when status returns to `NORMAL`; `buzzer OFF` mute persists across states.
-- `PubSubClient::publish` has no `String` overload in this setup; pass `.c_str()` for `String` payloads.
-- `PubSubClient` keeps the `setServer` pointer, so the host must live in the static `mqttServer` buffer; never pass a temporary `String`.
-- `prefs` is already a global in `ESP32_WiFi_Connect`; the sketch's Preferences instance is named `brokerPrefs` to avoid a multiple-definition link error.
-- A failed DHT read logs and delays 500 ms, skipping that loop's publish. DHT11 reads are slow; don't poll faster.
-- `ESPAsyncWebServer`/`AsyncTCP` are installed per the README but are not currently included; keep them only if adding a web server.
+- `PubSubClient::publish` has no `String` overload here; pass `.c_str()`. It also stores the `setServer` pointer, so the host must stay in the static `mqttServer` buffer — never pass a temporary `String`.
+- `prefs` is a global in `ESP32_WiFi_Connect`; the sketch's Preferences instance is named `brokerPrefs` to avoid a multiple-definition link error.
+- A failed DHT read logs, delays 500 ms, and skips that loop's publish. DHT11 reads are slow; don't poll faster.
+- The broker-change sequence is order-sensitive: flush queued acks on the old broker before `disconnect()`/`setServer()` (see `brokerChangePending` in `loop()`).

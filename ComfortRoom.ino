@@ -12,21 +12,14 @@
 #define DHT_TYPE DHT11
 DHT dht(DHT_PIN, DHT_TYPE);
 
-#define DEVICE_ID "comfort"
+#define DEVICE_ID "comfortroom"
 #define TOPIC_PREFIX DEVICE_ID "/room/"
 
 #define TOPIC(path) (TOPIC_PREFIX path)
 
-// Broker host is runtime-configurable: `control/broker <host>` stores it in NVS
-// and reconnects. MQTT_SERVER is only the first-boot fallback, supplied at build
-// time without quotes, e.g.:
-//   --build-property compiler.cpp.extra_flags=-DMQTT_SERVER=192.168.1.100
-#ifndef MQTT_SERVER
-#error "MQTT_SERVER is not defined; pass -DMQTT_SERVER=<host> via compiler.cpp.extra_flags"
-#endif
-
-#define STRINGIFY_IMPL(value) #value
-#define STRINGIFY(value) STRINGIFY_IMPL(value)
+// Hardcoded broker host. A runtime `control/broker <host>` change overrides
+// this and is persisted in NVS.
+#define MQTT_SERVER "192.168.1.100"
 
 constexpr const char *BROKER_NAMESPACE = "comfort";
 constexpr const char *BROKER_KEY = "mqtt_server";
@@ -34,7 +27,7 @@ constexpr size_t MQTT_SERVER_MAX = 64;
 
 const int mqtt_port = 1883;
 
-char mqttServer[MQTT_SERVER_MAX] = STRINGIFY(MQTT_SERVER);
+char mqttServer[MQTT_SERVER_MAX] = MQTT_SERVER;
 bool brokerChangePending = false;
 String pendingBrokerHost;
 
@@ -156,7 +149,7 @@ void loadBrokerHost() {
     snprintf(mqttServer, sizeof(mqttServer), "%s", stored.c_str());
     Serial.println("MQTT broker from NVS: " + String(mqttServer));
   } else {
-    Serial.println("MQTT broker from build default: " + String(mqttServer));
+    Serial.println("MQTT broker from hardcoded default: " + String(mqttServer));
   }
 }
 
